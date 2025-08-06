@@ -1,0 +1,10 @@
+pymongo
+passlib[bcrypt]
+python-jose
+fastapi
+uvicorn
+python-multipart
+langchain-openai
+langgraph
+python-dotenv
+typing-extensions 
