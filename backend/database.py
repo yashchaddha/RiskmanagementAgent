@@ -146,8 +146,9 @@ class RiskDatabaseService:
                     "organization_name": organization_name,
                     "location": location,
                     "domain": domain,
-                    "risks": [
+                "risks": [
                         {
+                            "_id": ObjectId(),
                             "description": risk.description,
                             "category": risk.category,
                             "likelihood": risk.likelihood,
@@ -489,6 +490,7 @@ class RiskDatabaseService:
                 # Update existing document by appending new finalized risks
                 new_finalized_risks = [
                     {
+                        "_id": ObjectId(),
                         "description": risk.description,
                         "category": risk.category,
                         "likelihood": risk.likelihood,
@@ -581,6 +583,7 @@ class RiskDatabaseService:
                     "domain": domain,
                     "risks": [
                         {
+                            "_id": ObjectId(),
                             "description": risk.description,
                             "category": risk.category,
                             "likelihood": risk.likelihood,
@@ -723,6 +726,202 @@ class RiskDatabaseService:
                 message=f"Error retrieving finalized risks: {str(e)}",
                 data=None
             )
+    
+    @staticmethod
+    async def delete_finalized_risk(user_id: str, risk_id: str) -> FinalizedRisksResponse:
+        """Delete a specific finalized risk by its ID"""
+        try:
+            # Verify user exists
+            user = users_collection.find_one({"username": user_id})
+            if not user:
+                return FinalizedRisksResponse(success=False, message=f"User {user_id} not found", data=None)
+            # Find user's finalized risks document
+            existing_doc = finalized_risks_collection.find_one({"user_ref": user["_id"]})
+            if not existing_doc:
+                return FinalizedRisksResponse(success=False, message="No finalized risks found for user", data=None)
+            # Ensure the risk to delete exists
+            risks = existing_doc.get("risks", [])
+            if not any(str(risk.get("_id", "")) == risk_id for risk in risks):
+                return FinalizedRisksResponse(success=False, message="Risk not found", data=None)
+            # Remove the risk
+            from bson import ObjectId
+            try:
+                # Try to convert to ObjectId if it's a valid ObjectId string
+                risk_object_id = ObjectId(risk_id)
+                result = finalized_risks_collection.update_one(
+                    {"_id": existing_doc["_id"]},
+                    {"$pull": {"risks": {"_id": risk_object_id}}}
+                )
+            except Exception:
+                # If conversion fails, it might be stored as string, so try string comparison
+                result = finalized_risks_collection.update_one(
+                    {"_id": existing_doc["_id"]},
+                    {"$pull": {"risks": {"_id": risk_id}}}
+                )
+            if result.modified_count == 0:
+                return FinalizedRisksResponse(success=False, message="Failed to delete risk", data=None)
+            # Determine new total and handle empty case
+            new_total = len(risks) - 1
+            if new_total <= 0:
+                # No risks remain; delete the entire document
+                finalized_risks_collection.delete_one({"_id": existing_doc["_id"]})
+                # Return empty FinalizedRisks model instead of None
+                empty_finalized_model = FinalizedRisks(
+                    id="",
+                    user_id=existing_doc.get("user_id", ""),
+                    organization_name=existing_doc.get("organization_name", ""),
+                    location=existing_doc.get("location", ""),
+                    domain=existing_doc.get("domain", ""),
+                    risks=[],
+                    total_risks=0,
+                    created_at=existing_doc.get("created_at"),
+                    updated_at=datetime.utcnow()
+                )
+                return FinalizedRisksResponse(
+                    success=True,
+                    message="All finalized risks deleted; document removed.",
+                    data=empty_finalized_model
+                )
+            # Update remaining document with new count and timestamp
+            finalized_risks_collection.update_one(
+                {"_id": existing_doc["_id"]},
+                {"$set": {"total_risks": new_total, "updated_at": datetime.utcnow()}}
+            )
+            # Retrieve updated document
+            updated_doc = finalized_risks_collection.find_one({"_id": existing_doc["_id"]})
+            # Convert to FinalizedRisks model
+            updated_risks = [
+                FinalizedRisk(
+                    id=str(r.get("_id", "")),
+                    description=r["description"],
+                    category=r["category"],
+                    likelihood=r["likelihood"],
+                    impact=r["impact"],
+                    treatment_strategy=r["treatment_strategy"],
+                    asset_value=r.get("asset_value"),
+                    department=r.get("department"),
+                    risk_owner=r.get("risk_owner"),
+                    security_impact=r.get("security_impact"),
+                    target_date=r.get("target_date"),
+                    risk_progress=r.get("risk_progress", "Identified"),
+                    residual_exposure=r.get("residual_exposure"),
+                    created_at=r["created_at"],
+                    updated_at=r["updated_at"]
+                ) for r in updated_doc.get("risks", [])
+            ]
+            finalized_model = FinalizedRisks(
+                id=str(updated_doc["_id"]),
+                user_id=updated_doc.get("user_id", ""),
+                organization_name=updated_doc.get("organization_name", ""),
+                location=updated_doc.get("location", ""),
+                domain=updated_doc.get("domain", ""),
+                risks=updated_risks,
+                total_risks=updated_doc.get("total_risks", 0),
+                created_at=updated_doc.get("created_at"),
+                updated_at=updated_doc.get("updated_at")
+            )
+            return FinalizedRisksResponse(success=True, message="Risk deleted successfully", data=finalized_model)
+        except Exception as e:
+            return FinalizedRisksResponse(success=False, message=f"Error deleting risk: {str(e)}", data=None)
+
+    @staticmethod
+    async def delete_finalized_risk_by_index(user_id: str, risk_index: int) -> FinalizedRisksResponse:
+        """Delete a specific finalized risk by its array index"""
+        try:
+            # Verify user exists
+            user = users_collection.find_one({"username": user_id})
+            if not user:
+                return FinalizedRisksResponse(success=False, message=f"User {user_id} not found", data=None)
+            
+            # Find user's finalized risks document
+            existing_doc = finalized_risks_collection.find_one({"user_ref": user["_id"]})
+            if not existing_doc:
+                return FinalizedRisksResponse(success=False, message="No finalized risks found for user", data=None)
+            
+            # Get risks array and validate index
+            risks = existing_doc.get("risks", [])
+            if risk_index < 0 or risk_index >= len(risks):
+                return FinalizedRisksResponse(success=False, message=f"Invalid risk index {risk_index}. Available indices: 0-{len(risks)-1}", data=None)
+            
+            print(f"DEBUG DELETE BY INDEX: Deleting risk at index {risk_index} from {len(risks)} total risks")
+            
+            # Remove risk at the specified index
+            risks.pop(risk_index)
+            new_total = len(risks)
+            
+            if new_total <= 0:
+                # No risks remain; delete the entire finalized_risks document
+                print(f"DEBUG DELETE BY INDEX: No risks remaining, deleting entire document for user {user_id}")
+                delete_result = finalized_risks_collection.delete_one({"_id": existing_doc["_id"]})
+                print(f"DEBUG DELETE BY INDEX: Document deletion result: {delete_result.deleted_count} document(s) deleted")
+                
+                # Return empty FinalizedRisks model to indicate all risks deleted
+                empty_finalized_model = FinalizedRisks(
+                    id="",
+                    user_id=existing_doc.get("user_id", ""),
+                    organization_name=existing_doc.get("organization_name", ""),
+                    location=existing_doc.get("location", ""),
+                    domain=existing_doc.get("domain", ""),
+                    risks=[],
+                    total_risks=0,
+                    created_at=existing_doc.get("created_at"),
+                    updated_at=datetime.utcnow()
+                )
+                return FinalizedRisksResponse(
+                    success=True,
+                    message="Last finalized risk deleted; all finalized risks removed.",
+                    data=empty_finalized_model
+                )
+            
+            # Update document with remaining risks
+            result = finalized_risks_collection.update_one(
+                {"_id": existing_doc["_id"]},
+                {"$set": {"risks": risks, "total_risks": new_total, "updated_at": datetime.utcnow()}}
+            )
+            
+            if result.modified_count == 0:
+                return FinalizedRisksResponse(success=False, message="Failed to delete risk", data=None)
+            
+            # Retrieve updated document
+            updated_doc = finalized_risks_collection.find_one({"_id": existing_doc["_id"]})
+            
+            # Convert remaining risks to FinalizedRisk models
+            updated_risks = [
+                FinalizedRisk(
+                    id=str(r.get("_id", "")),
+                    description=r["description"],
+                    category=r["category"],
+                    likelihood=r["likelihood"],
+                    impact=r["impact"],
+                    treatment_strategy=r["treatment_strategy"],
+                    asset_value=r.get("asset_value"),
+                    department=r.get("department"),
+                    risk_owner=r.get("risk_owner"),
+                    security_impact=r.get("security_impact"),
+                    target_date=r.get("target_date"),
+                    risk_progress=r.get("risk_progress", "Identified"),
+                    residual_exposure=r.get("residual_exposure"),
+                    created_at=r["created_at"],
+                    updated_at=r["updated_at"]
+                ) for r in updated_doc.get("risks", [])
+            ]
+            
+            finalized_model = FinalizedRisks(
+                id=str(updated_doc["_id"]),
+                user_id=updated_doc.get("user_id", ""),
+                organization_name=updated_doc.get("organization_name", ""),
+                location=updated_doc.get("location", ""),
+                domain=updated_doc.get("domain", ""),
+                risks=updated_risks,
+                total_risks=updated_doc.get("total_risks", 0),
+                created_at=updated_doc.get("created_at"),
+                updated_at=updated_doc.get("updated_at")
+            )
+            
+            return FinalizedRisksResponse(success=True, message=f"Risk at index {risk_index} deleted successfully", data=finalized_model)
+            
+        except Exception as e:
+            return FinalizedRisksResponse(success=False, message=f"Error deleting risk by index: {str(e)}", data=None)
 
 
 class UserDatabaseService:

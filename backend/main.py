@@ -376,6 +376,20 @@ async def get_finalized_risks(current_user=Depends(get_current_user)):
             data=None
         )
 
+@app.delete("/risks/finalized/{risk_id}", response_model=FinalizedRisksResponse)
+async def delete_finalized_risk(risk_id: str, current_user=Depends(get_current_user)):
+    """Delete a specific finalized risk by ID"""
+    user_id = current_user.get("username", "")
+    result = await RiskDatabaseService.delete_finalized_risk(user_id, risk_id)
+    return result
+
+@app.delete("/risks/finalized/index/{risk_index}", response_model=FinalizedRisksResponse)
+async def delete_finalized_risk_by_index(risk_index: int, current_user=Depends(get_current_user)):
+    """Delete a specific finalized risk by array index"""
+    user_id = current_user.get("username", "")
+    result = await RiskDatabaseService.delete_finalized_risk_by_index(user_id, risk_index)
+    return result
+
 
 @app.get("/user/risk-profiles")
 async def get_user_risk_profiles(current_user=Depends(get_current_user)):

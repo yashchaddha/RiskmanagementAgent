@@ -79,8 +79,12 @@
 }
 
 @keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
 }
 
 .error-message {
@@ -218,20 +222,49 @@
   color: white;
 }
 
-.category-operational { background: #007bff; }
-.category-financial { background: #28a745; }
-.category-strategic { background: #ffc107; color: #212529; }
-.category-compliance { background: #dc3545; }
-.category-technology { background: #6f42c1; }
-.category-reputational { background: #fd7e14; }
-.category-environmental { background: #20c997; }
-.category-competition { background: #e74c3c; }
-.category-external { background: #9b59b6; }
-.category-innovation { background: #f39c12; }
-.category-internal { background: #3498db; }
-.category-project { background: #1abc9c; }
-.category-safety { background: #34495e; }
-.category-default { background: #6c757d; }
+.category-operational {
+  background: #007bff;
+}
+.category-financial {
+  background: #28a745;
+}
+.category-strategic {
+  background: #ffc107;
+  color: #212529;
+}
+.category-compliance {
+  background: #dc3545;
+}
+.category-technology {
+  background: #6f42c1;
+}
+.category-reputational {
+  background: #fd7e14;
+}
+.category-environmental {
+  background: #20c997;
+}
+.category-competition {
+  background: #e74c3c;
+}
+.category-external {
+  background: #9b59b6;
+}
+.category-innovation {
+  background: #f39c12;
+}
+.category-internal {
+  background: #3498db;
+}
+.category-project {
+  background: #1abc9c;
+}
+.category-safety {
+  background: #34495e;
+}
+.category-default {
+  background: #6c757d;
+}
 
 .risk-levels {
   display: flex;
@@ -348,6 +381,29 @@
   color: white;
 }
 
+/* Footer section of each risk card, with date and delete button */
+.risk-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 1rem;
+}
+
+/* Delete button styling */
+.delete-risk-btn {
+  background: #dc3545;
+  color: #fff;
+  border: none;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.3s ease;
+}
+.delete-risk-btn:hover {
+  background: #c82333;
+}
+
 .exposure-ongoing-mitigation {
   background: #6f42c1;
   color: white;
@@ -395,17 +451,17 @@
     width: 98%;
     max-height: 95vh;
   }
-  
+
   .risks-grid {
     grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
     gap: 1rem;
   }
-  
+
   .risk-register-controls {
     flex-direction: column;
     align-items: stretch;
   }
-  
+
   .search-filters {
     justify-content: center;
   }
@@ -417,31 +473,31 @@
   .risk-register-footer {
     padding: 1rem;
   }
-  
+
   .risk-register-header h3 {
     font-size: 1.2rem;
   }
-  
+
   .search-filters {
     flex-direction: column;
     gap: 0.5rem;
   }
-  
+
   .search-input,
   .filter-select {
     width: 100%;
     min-width: auto;
   }
-  
+
   .risks-grid {
     grid-template-columns: 1fr;
     gap: 1rem;
   }
-  
+
   .risk-card-details {
     grid-template-columns: 1fr;
   }
-  
+
   .risk-card {
     padding: 1rem;
   }
@@ -453,8 +509,8 @@
     height: 100vh;
     border-radius: 0;
   }
-  
+
   .risk-register-container {
     padding: 1rem;
   }
-} 
+}
