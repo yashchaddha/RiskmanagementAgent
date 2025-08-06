@@ -497,13 +497,15 @@ async def create_matrix_recommendation(request: MatrixRecommendationRequest, cur
     try:
         matrix_size = request.matrix_size
         
+        # Check if user already has finalized risks
+        user_id = current_user.get("username", "")
+        finalized = await RiskDatabaseService.get_user_finalized_risks(user_id)
+        if finalized.success and finalized.data and finalized.data.risks:
+            return {"success": False, "message": "You already have finalized risks. Cannot generate a new matrix recommendation."}
         # Validate matrix size
         if matrix_size not in ["3x3", "4x4", "5x5"]:
-            return {
-                "success": False,
-                "message": "Invalid matrix size. Must be 3x3, 4x4, or 5x5"
-            }
-        
+            return {"success": False, "message": "Invalid matrix size. Must be 3x3, 4x4, or 5x5"}
+
         # Get organization context from current user
         organization_name = current_user.get("organization_name", "the organization")
         location = current_user.get("location", "the current location")
@@ -642,4 +644,4 @@ async def update_risk_field(
         return {
             "success": False,
             "message": f"Error updating risk field: {str(e)}"
-        } 
+        }
