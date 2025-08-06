@@ -493,7 +493,7 @@ async def update_user_risk_profile(request: RiskProfileUpdateRequest, current_us
 
 @app.post("/user/risk-profiles/matrix-recommendation")
 async def create_matrix_recommendation(request: MatrixRecommendationRequest, current_user=Depends(get_current_user)):
-    """Get preview data for a specific matrix size (no database save)"""
+    """Get preview data for a specific matrix size using LLM (no database save)"""
     try:
         matrix_size = request.matrix_size
         
@@ -504,14 +504,30 @@ async def create_matrix_recommendation(request: MatrixRecommendationRequest, cur
                 "message": "Invalid matrix size. Must be 3x3, 4x4, or 5x5"
             }
         
-        # Get preview data without saving to database
-        preview_data = RiskProfileDatabaseService.get_matrix_preview_data(matrix_size)
+        # Get organization context from current user
+        organization_name = current_user.get("organization_name", "the organization")
+        location = current_user.get("location", "the current location")
+        domain = current_user.get("domain", "the industry domain")
         
-        return {
-            "success": True,
-            "message": f"Preview data for {matrix_size} matrix generated successfully",
-            "data": preview_data
-        }
+        # Generate matrix recommendation using LLM
+        result = await RiskProfileDatabaseService.generate_matrix_recommendation_with_llm(
+            matrix_size=matrix_size,
+            organization_name=organization_name,
+            location=location,
+            domain=domain
+        )
+        
+        if result.success:
+            return {
+                "success": True,
+                "message": f"AI-generated {matrix_size} matrix recommendation created successfully for {organization_name}",
+                "data": result.data
+            }
+        else:
+            return {
+                "success": False,
+                "message": result.message
+            }
         
     except Exception as e:
         return {
@@ -533,9 +549,17 @@ async def apply_matrix_recommendation(request: MatrixRecommendationRequest, curr
                 "message": "Invalid matrix size. Must be 3x3, 4x4, or 5x5"
             }
         
+        # Get organization context from current user
+        organization_name = current_user.get("organization_name", "")
+        location = current_user.get("location", "")
+        domain = current_user.get("domain", "")
+        
         result = await RiskProfileDatabaseService.apply_matrix_recommendation(
             user_id=user_id,
-            matrix_size=matrix_size
+            matrix_size=matrix_size,
+            organization_name=organization_name,
+            location=location,
+            domain=domain
         )
         
         if result.success:

@@ -1224,14 +1224,49 @@ class RiskProfileDatabaseService:
             return DatabaseResult(False, f"Error creating matrix risk profiles: {str(e)}")
 
     @staticmethod
-    async def apply_matrix_recommendation(user_id: str, matrix_size: str) -> DatabaseResult:
+    async def apply_matrix_recommendation(user_id: str, matrix_size: str, organization_name: str = None, location: str = None, domain: str = None) -> DatabaseResult:
         """Apply matrix recommendation by replacing existing profiles"""
         try:
             # First, delete existing profiles for this user
             risk_profiles_collection.delete_many({"userId": user_id})
             
-            # Then create new profiles with the specified matrix size
-            return await RiskProfileDatabaseService.create_matrix_risk_profiles(user_id, matrix_size)
+            # If organization context is provided, use LLM-generated recommendation
+            if organization_name and location and domain:
+                result = await RiskProfileDatabaseService.generate_matrix_recommendation_with_llm(
+                    matrix_size, organization_name, location, domain
+                )
+                
+                if result.success:
+                    # Create profiles from LLM-generated data
+                    profile_ids = []
+                    for profile in result.data["profiles"]:
+                        profile_data = {
+                            "userId": user_id,
+                            "riskType": profile["riskType"],
+                            "definition": profile["definition"],
+                            "likelihoodScale": profile["likelihoodScale"],
+                            "impactScale": profile["impactScale"],
+                            "matrixSize": profile["matrixSize"],
+                            "createdAt": datetime.utcnow(),
+                            "updatedAt": datetime.utcnow()
+                        }
+                        
+                        result_insert = risk_profiles_collection.insert_one(profile_data)
+                        profile_ids.append(str(result_insert.inserted_id))
+                    
+                    # Update user's risks_applicable field
+                    users_collection.update_one(
+                        {"username": user_id},
+                        {"$set": {"risks_applicable": profile_ids}}
+                    )
+                    
+                    return DatabaseResult(True, f"Successfully applied AI-generated {matrix_size} matrix recommendation", {"profile_ids": profile_ids})
+                else:
+                    # Fallback to default matrix if LLM generation fails
+                    return await RiskProfileDatabaseService.create_matrix_risk_profiles(user_id, matrix_size)
+            else:
+                # Use default matrix if no organization context provided
+                return await RiskProfileDatabaseService.create_matrix_risk_profiles(user_id, matrix_size)
             
         except Exception as e:
             return DatabaseResult(False, f"Error applying matrix recommendation: {str(e)}")
@@ -1269,4 +1304,128 @@ class RiskProfileDatabaseService:
             return DatabaseResult(True, f"Successfully applied {matrix_size} matrix configuration with customizations", {"profile_ids": profile_ids})
             
         except Exception as e:
-            return DatabaseResult(False, f"Error applying matrix configuration: {str(e)}") 
+            return DatabaseResult(False, f"Error applying matrix configuration: {str(e)}")
+
+    @staticmethod
+    async def generate_matrix_recommendation_with_llm(matrix_size: str, organization_name: str, location: str, domain: str) -> DatabaseResult:
+        """Generate matrix recommendation using LLM based on organization context"""
+        try:
+            from openai import OpenAI
+            import json
+            import os
+            
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                return DatabaseResult(False, "OpenAI API key not configured")
+            
+            client = OpenAI(api_key=api_key)
+            
+            # Create prompt for LLM to generate matrix scales
+            prompt = f"""You are an expert Risk Management Specialist. Generate a {matrix_size} risk matrix specifically tailored for {organization_name} located in {location} operating in the {domain} domain.
+
+Create likelihood and impact scales that are relevant to this organization's specific context, industry, and location.
+
+Return ONLY valid JSON in this exact format:
+
+{{
+  "matrix_scales": {{
+    "likelihood": [
+      {{"level": 1, "title": "Scale Title", "description": "Detailed description"}},
+      {{"level": 2, "title": "Scale Title", "description": "Detailed description"}},
+      {{"level": 3, "title": "Scale Title", "description": "Detailed description"}}
+    ],
+    "impact": [
+      {{"level": 1, "title": "Scale Title", "description": "Detailed description"}},
+      {{"level": 2, "title": "Scale Title", "description": "Detailed description"}},
+      {{"level": 3, "title": "Scale Title", "description": "Detailed description"}}
+    ]
+  }},
+  "risk_categories": [
+    {{
+      "riskType": "Strategic Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Operational Risk", 
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Financial Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Compliance Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Reputational Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Health and Safety Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Environmental Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Technology Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }}
+  ]
+}}
+
+For {matrix_size} matrix:
+- Likelihood scale should have {matrix_size.split('x')[0]} levels
+- Impact scale should have {matrix_size.split('x')[1]} levels
+- Make scales relevant to {domain} industry and {location} location
+- Ensure descriptions are specific to {organization_name}'s context
+- Use appropriate terminology for the industry and region
+
+IMPORTANT: Return ONLY valid JSON. Do not include any other text."""
+            
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=2000
+            )
+            
+            content = response.choices[0].message.content
+            
+            # Extract JSON from response
+            json_start = content.find('{')
+            json_end = content.rfind('}') + 1
+            
+            if json_start != -1 and json_end > json_start:
+                json_str = content[json_start:json_end]
+                data = json.loads(json_str)
+                
+                if "matrix_scales" in data and "risk_categories" in data:
+                    # Create preview profiles using LLM-generated data
+                    preview_profiles = []
+                    for category in data["risk_categories"]:
+                        profile_data = {
+                            "riskType": category["riskType"],
+                            "definition": category["definition"],
+                            "likelihoodScale": data["matrix_scales"]["likelihood"],
+                            "impactScale": data["matrix_scales"]["impact"],
+                            "matrixSize": matrix_size
+                        }
+                        preview_profiles.append(profile_data)
+                    
+                    return DatabaseResult(True, "Matrix recommendation generated successfully", {
+                        "profiles": preview_profiles,
+                        "matrixSize": matrix_size,
+                        "totalProfiles": len(preview_profiles)
+                    })
+                else:
+                    return DatabaseResult(False, "Invalid response format from LLM")
+            else:
+                return DatabaseResult(False, "No valid JSON found in LLM response")
+                
+        except json.JSONDecodeError as e:
+            return DatabaseResult(False, f"Error parsing JSON response: {str(e)}")
+        except Exception as e:
+            return DatabaseResult(False, f"Error generating matrix recommendation: {str(e)}")
