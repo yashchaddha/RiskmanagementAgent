@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from auth import router as auth_router, get_current_user
 from agent import run_agent, get_risk_assessment_summary, get_finalized_risks_summary, GREETING_MESSAGE
@@ -175,16 +175,47 @@ async def get_user_risks(current_user=Depends(get_current_user)):
     user_id = current_user.get("username", "")
     result = await RiskDatabaseService.get_user_risks(user_id)
     return result
+@app.get("/user/preferences")
+async def get_user_preferences(current_user=Depends(get_current_user)):
+    """Return the user's risk profile preferences including likelihood and impact scales"""
+    from database import RiskProfileDatabaseService
+    # Default scales
+    default_likelihood = ["Low", "Medium", "High", "Severe", "Critical"]
+    default_impact = ["Low", "Medium", "High", "Severe", "Critical"]
+    user_id = current_user.get("username", "")
+    # Retrieve profiles synchronously
+    pref_result = RiskProfileDatabaseService.get_user_risk_profiles(user_id)
+    profiles = []
+    if pref_result.success and pref_result.data:
+        profiles = pref_result.data.get("profiles", []) or []
+    # Use first profile for scales if available
+    if profiles:
+        first = profiles[0]
+        likelihood = [lvl.get("title") for lvl in first.get("likelihoodScale", [])]
+        impact = [lvl.get("title") for lvl in first.get("impactScale", [])]
+    else:
+        likelihood = default_likelihood
+        impact = default_impact
+    return {
+        "success": True,
+        "risks_applicable": current_user.get("risks_applicable", []),
+        "risk_profiles_count": len(profiles),
+        "likelihood": likelihood,
+        "impact": impact
+    }
+
+class SelectionUpdateRequest(BaseModel):
+    is_selected: bool
 
 @app.put("/risks/{risk_index}/selection")
 async def update_risk_selection(
     risk_index: int,
-    is_selected: bool,
+    selection: SelectionUpdateRequest,
     current_user=Depends(get_current_user)
 ):
     """Update risk selection status"""
     user_id = current_user.get("username", "")
-    result = await RiskDatabaseService.update_risk_selection(user_id, risk_index, is_selected)
+    result = await RiskDatabaseService.update_risk_selection(user_id, risk_index, selection.is_selected)
     return result
 
 @app.get("/risk-categories")
@@ -345,44 +376,13 @@ async def get_finalized_risks(current_user=Depends(get_current_user)):
             data=None
         )
 
-@app.get("/user/preferences")
-async def get_user_preferences(current_user=Depends(get_current_user)):
-    """Get current user's risk preferences"""
-    try:
-        # Get user's risk profiles to provide preference information
-        user_id = current_user.get("username", "")
-        result = await RiskProfileDatabaseService.get_user_risk_profiles(user_id)
-        
-        if result.success:
-            profiles = result.data.get("profiles", [])
-            # Return a summary of the user's risk profiles as preferences
-            return {
-                "success": True,
-                "risks_applicable": current_user.get("risks_applicable", []),
-                "risk_profiles_count": len(profiles),
-                "message": f"User has {len(profiles)} risk profiles configured"
-            }
-        else:
-            return {
-                "success": False,
-                "message": result.message,
-                "risks_applicable": current_user.get("risks_applicable", []),
-                "risk_profiles_count": 0
-            }
-    except Exception as e:
-        return {
-            "success": False,
-            "message": f"Error retrieving user preferences: {str(e)}",
-            "risks_applicable": current_user.get("risks_applicable", []),
-            "risk_profiles_count": 0
-        }
 
 @app.get("/user/risk-profiles")
 async def get_user_risk_profiles(current_user=Depends(get_current_user)):
     """Get user's risk profiles"""
     try:
         user_id = current_user.get("username", "")
-        result = await RiskProfileDatabaseService.get_user_risk_profiles(user_id)
+        result = RiskProfileDatabaseService.get_user_risk_profiles(user_id)
         
         if result.success:
             return {
@@ -407,7 +407,7 @@ async def get_user_risk_profiles_table(current_user=Depends(get_current_user)):
     """Get user's risk profiles formatted as a table"""
     try:
         user_id = current_user.get("username", "")
-        result = await RiskProfileDatabaseService.get_user_risk_profiles(user_id)
+        result = RiskProfileDatabaseService.get_user_risk_profiles(user_id)
         
         if result.success:
             profiles = result.data.get("profiles", [])

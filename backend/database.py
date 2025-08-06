@@ -1024,17 +1024,15 @@ class RiskProfileDatabaseService:
             )
     
     @staticmethod
-    async def get_user_risk_profiles(user_id: str) -> DatabaseResult:
+    def get_user_risk_profiles(user_id: str) -> DatabaseResult:
         """Get all risk profiles for a user"""
         try:
             profiles = list(risk_profiles_collection.find({"userId": user_id}))
-            
             return DatabaseResult(
                 success=True,
                 message=f"Retrieved {len(profiles)} risk profiles for user {user_id}",
                 data={"profiles": profiles}
             )
-            
         except Exception as e:
             return DatabaseResult(
                 success=False,

@@ -286,13 +286,8 @@ def risk_generation_node(state: LLMState):
         
         # Get user's risk profiles to use their specific scales
         from database import RiskProfileDatabaseService
-        import asyncio
-        
-        # Create event loop for async operation
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(RiskProfileDatabaseService.get_user_risk_profiles(user_data.get("username", "")))
-        loop.close()
+        # Synchronously retrieve risk profiles
+        result = RiskProfileDatabaseService.get_user_risk_profiles(user_data.get("username", ""))
         
         # Default scales if profiles not available
         default_likelihood = ["Low", "Medium", "High", "Severe", "Critical"]
@@ -449,14 +444,9 @@ def preference_update_node(state: LLMState):
         
         # Get user's current risk profiles
         from database import RiskProfileDatabaseService
-        import asyncio
-        
-        # Create event loop for async operation
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(RiskProfileDatabaseService.get_user_risk_profiles(username))
-        loop.close()
-        
+        # Synchronously retrieve risk profiles
+        result = RiskProfileDatabaseService.get_user_risk_profiles(username)
+
         if not result.success or not result.data or not result.data.get("profiles"):
             return {
                 "output": "I apologize, but I couldn't retrieve your risk profiles. Please try accessing your risk profile dashboard first.",
@@ -883,4 +873,4 @@ GREETING_MESSAGE = """Welcome to the Risk Management Agent! I'm here to help you
 
 I can assist you with identifying operational, financial, strategic, and compliance risks, as well as provide guidance on industry regulations and best practices. 
 
-What specific risk management challenges or compliance requirements would you like to discuss today?""" 
+What specific risk management challenges or compliance requirements would you like to discuss today?"""
