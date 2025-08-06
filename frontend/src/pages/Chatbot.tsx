@@ -157,6 +157,21 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       return;
     }
 
+    // Check for risk generation intent
+    if (checkForRiskGenerationIntent(inputMessage)) {
+      const response = await generateRisksWithProfiles();
+      
+      const botMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        text: response,
+        sender: "bot",
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, botMessage]);
+      setIsLoading(false);
+      return;
+    }
+
     try {
       const token = localStorage.getItem("token");
       console.log("Token from localStorage:", token ? "Token exists" : "No token found");
@@ -640,6 +655,27 @@ Please try again or contact support if the issue persists.`,
     );
   };
 
+  const checkForRiskGenerationIntent = (message: string): boolean => {
+    const riskGenerationKeywords = [
+      "generate risks",
+      "generate risk assessment",
+      "create risks",
+      "identify risks",
+      "risk generation",
+      "generate comprehensive risks",
+      "generate risks for our organization",
+      "generate risks for my organization",
+      "create risk assessment",
+      "identify organizational risks",
+      "generate risk analysis",
+      "create risk analysis"
+    ];
+    
+    return riskGenerationKeywords.some(keyword => 
+      message.toLowerCase().includes(keyword.toLowerCase())
+    );
+  };
+
   const checkForRiskGeneration = async (response: string) => {
     // Check if the response contains generated risks (JSON format or text format)
     const hasJsonRisks = response.includes('"risks"') && response.includes('"description"');
@@ -666,8 +702,6 @@ Please try again or contact support if the issue persists.`,
       response.toLowerCase().includes(indicator.toLowerCase())
     );
     
-
-    
     // Only proceed if it's not a preference update and contains risk generation indicators
     if (!isPreferenceUpdate && (hasJsonRisks || riskGenerationIndicators.some(indicator => 
       response.toLowerCase().includes(indicator.toLowerCase())
@@ -684,6 +718,88 @@ Please try again or contact support if the issue persists.`,
       }
     }
     return response;
+  };
+
+  const generateRisksWithProfiles = async () => {
+    try {
+      setIsLoading(true);
+      const token = localStorage.getItem("token");
+      
+      const response = await fetch("http://localhost:8000/risks/generate-with-profiles", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          user_input: "Generate comprehensive risks for our organization",
+          conversation_history: messages
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        
+        if (data.success && data.data && data.data.risks) {
+          // Convert the risks to the expected format
+          const risks: Risk[] = data.data.risks.map((risk: any, index: number) => ({
+            id: `risk-${index + 1}`,
+            description: risk.description,
+            category: risk.category,
+            likelihood: risk.likelihood,
+            impact: risk.impact,
+            treatmentStrategy: risk.treatment_strategy || risk.treatmentStrategy,
+            isSelected: true,
+            assetValue: "",
+            department: "",
+            riskOwner: "",
+            securityImpact: undefined,
+            targetDate: "",
+            riskProgress: "Identified",
+            residualExposure: undefined
+          }));
+
+          setGeneratedRisks(risks);
+          setShowRiskTable(true);
+          
+          console.log("Generated risks:", risks);
+          console.log("showRiskTable set to true");
+          
+          // Save risks to database
+          await saveRisksToDatabase(risks);
+          
+          // Add success message to chat
+          const successMessage = `✅ Successfully generated ${risks.length} risks (5 per category) using your specific risk profiles!\n\nEach risk category has been assessed using your customized likelihood and impact scales for the most accurate evaluation.`;
+          
+          setMessages(prev => [...prev, {
+            id: Date.now().toString(),
+            text: successMessage,
+            sender: "bot",
+            timestamp: new Date()
+          }]);
+          
+          return successMessage;
+        } else {
+          throw new Error(data.message || "Failed to generate risks");
+        }
+      } else {
+        throw new Error("Failed to generate risks");
+      }
+    } catch (error) {
+      console.error("Error generating risks with profiles:", error);
+      const errorMessage = `❌ Error generating risks: ${error instanceof Error ? error.message : "Unknown error"}`;
+      
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        text: errorMessage,
+        sender: "bot",
+        timestamp: new Date()
+      }]);
+      
+      return errorMessage;
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const saveRisksToDatabase = async (risks: Risk[]) => {

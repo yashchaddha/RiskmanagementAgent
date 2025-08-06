@@ -199,65 +199,61 @@ function extractLastParagraph(text: string): string {
 function determineCategory(text: string): string {
   const textLower = text.toLowerCase();
   
-  if (textLower.includes('competition') || textLower.includes('competitor') || textLower.includes('market share')) {
-    return "Competition";
-  } else if (textLower.includes('external') || textLower.includes('economic') || textLower.includes('political')) {
-    return "External";
-  } else if (textLower.includes('financial') || textLower.includes('money') || textLower.includes('cost') || textLower.includes('revenue')) {
-    return "Financial";
-  } else if (textLower.includes('innovation') || textLower.includes('research') || textLower.includes('development') || textLower.includes('rd')) {
-    return "Innovation";
-  } else if (textLower.includes('internal') || textLower.includes('employee') || textLower.includes('management')) {
-    return "Internal";
-  } else if (textLower.includes('legal') || textLower.includes('compliance') || textLower.includes('regulation') || textLower.includes('law')) {
-    return "Legal and Compliance";
-  } else if (textLower.includes('operational') || textLower.includes('process') || textLower.includes('system')) {
-    return "Operational";
-  } else if (textLower.includes('project') || textLower.includes('timeline') || textLower.includes('scope')) {
-    return "Project Management";
-  } else if (textLower.includes('reputation') || textLower.includes('brand') || textLower.includes('public')) {
-    return "Reputational";
-  } else if (textLower.includes('safety') || textLower.includes('health') || textLower.includes('accident')) {
-    return "Safety";
-  } else if (textLower.includes('strategic') || textLower.includes('business') || textLower.includes('market')) {
-    return "Strategic";
-  } else if (textLower.includes('technology') || textLower.includes('cyber') || textLower.includes('security') || textLower.includes('data breach')) {
-    return "Technology";
+  if (textLower.includes('strategic') || textLower.includes('business') || textLower.includes('market') || textLower.includes('long-term')) {
+    return "Strategic Risk";
+  } else if (textLower.includes('operational') || textLower.includes('process') || textLower.includes('system') || textLower.includes('day-to-day')) {
+    return "Operational Risk";
+  } else if (textLower.includes('financial') || textLower.includes('money') || textLower.includes('cost') || textLower.includes('revenue') || textLower.includes('cash flow')) {
+    return "Financial Risk";
+  } else if (textLower.includes('legal') || textLower.includes('compliance') || textLower.includes('regulation') || textLower.includes('law') || textLower.includes('regulatory')) {
+    return "Compliance Risk";
+  } else if (textLower.includes('reputation') || textLower.includes('brand') || textLower.includes('public') || textLower.includes('image')) {
+    return "Reputational Risk";
+  } else if (textLower.includes('safety') || textLower.includes('health') || textLower.includes('accident') || textLower.includes('injury')) {
+    return "Health and Safety Risk";
+  } else if (textLower.includes('environmental') || textLower.includes('environment') || textLower.includes('pollution') || textLower.includes('sustainability')) {
+    return "Environmental Risk";
+  } else if (textLower.includes('technology') || textLower.includes('cyber') || textLower.includes('security') || textLower.includes('data breach') || textLower.includes('it')) {
+    return "Technology Risk";
   }
   
-  return "Operational";
+  return "Operational Risk";
 }
 
 function determineLikelihood(text: string): string {
   const textLower = text.toLowerCase();
   
-  if (textLower.includes('critical') || textLower.includes('extremely likely') || textLower.includes('certain')) {
-    return "Critical";
-  } else if (textLower.includes('severe') || textLower.includes('very likely') || textLower.includes('frequent')) {
-    return "Severe";
-  } else if (textLower.includes('high') || textLower.includes('likely') || textLower.includes('probable')) {
-    return "High";
-  } else if (textLower.includes('low') || textLower.includes('unlikely') || textLower.includes('rare')) {
-    return "Low";
+  if (textLower.includes('critical') || textLower.includes('extremely likely') || textLower.includes('certain') || textLower.includes('very likely')) {
+    return "Very Likely";
+  } else if (textLower.includes('severe') || textLower.includes('likely') || textLower.includes('frequent') || textLower.includes('expected')) {
+    return "Likely";
+  } else if (textLower.includes('high') || textLower.includes('probable') || textLower.includes('possible') || textLower.includes('could occur')) {
+    return "Possible";
+  } else if (textLower.includes('low') || textLower.includes('unlikely') || textLower.includes('rare') || textLower.includes('may occur')) {
+    return "Unlikely";
+  } else if (textLower.includes('very unlikely') || textLower.includes('exceptional') || textLower.includes('minimal chance')) {
+    return "Rare";
   }
   
-  return "Medium";
+  return "Possible";
 }
 
 function determineImpact(text: string): string {
   const textLower = text.toLowerCase();
   
-  if (textLower.includes('critical') || textLower.includes('catastrophic') || textLower.includes('devastating')) {
+  if (textLower.includes('critical') || textLower.includes('catastrophic') || textLower.includes('devastating') || textLower.includes('severe')) {
     return "Critical";
-  } else if (textLower.includes('severe') || textLower.includes('major') || textLower.includes('significant')) {
+  } else if (textLower.includes('major') || textLower.includes('significant') || textLower.includes('substantial')) {
     return "Severe";
-  } else if (textLower.includes('high') || textLower.includes('substantial') || textLower.includes('considerable')) {
-    return "High";
-  } else if (textLower.includes('low') || textLower.includes('minor') || textLower.includes('minimal')) {
-    return "Low";
+  } else if (textLower.includes('high') || textLower.includes('considerable') || textLower.includes('noticeable')) {
+    return "Major";
+  } else if (textLower.includes('moderate') || textLower.includes('medium') || textLower.includes('modest')) {
+    return "Moderate";
+  } else if (textLower.includes('low') || textLower.includes('minor') || textLower.includes('minimal') || textLower.includes('insignificant')) {
+    return "Minor";
   }
   
-  return "Medium";
+  return "Moderate";
 }
 
 function cleanText(text: string): string {

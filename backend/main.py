@@ -618,4 +618,181 @@ async def update_risk_field(
         return {
             "success": False,
             "message": f"Error updating risk field: {str(e)}"
-        } 
+        }
+
+class GenerateRisksWithProfilesRequest(BaseModel):
+    user_input: str
+    conversation_history: Optional[List[dict]] = []
+
+@app.post("/risks/generate-with-profiles")
+async def generate_risks_with_profiles(
+    request: GenerateRisksWithProfilesRequest,
+    current_user=Depends(get_current_user)
+):
+    """Generate risks using the user's specific risk profiles"""
+    try:
+        from openai import OpenAI
+        import json
+        import os
+        
+        # Get user's risk profiles
+        user_id = current_user.get("username", "")
+        result = await RiskProfileDatabaseService.get_user_risk_profiles(user_id)
+        
+        if not result.success or not result.data or not result.data.get("profiles"):
+            return {"success": False, "message": "No risk profiles found for user"}
+        
+        profiles = result.data["profiles"]
+        
+        # Create category-specific information
+        category_info = {}
+        user_categories = []
+        for profile in profiles:
+            risk_type = profile.get("riskType", "")
+            likelihood_scale = [level["title"] for level in profile.get("likelihoodScale", [])]
+            impact_scale = [level["title"] for level in profile.get("impactScale", [])]
+            category_info[risk_type] = {
+                "definition": profile.get("definition", ""),
+                "likelihood_scale": likelihood_scale,
+                "impact_scale": impact_scale
+            }
+            user_categories.append(risk_type)
+        
+        # Create the prompt with category-specific information
+        organization_name = current_user.get("organization_name", "the organization")
+        location = current_user.get("location", "the current location")
+        domain = current_user.get("domain", "the industry domain")
+        
+        prompt = f"""You are an expert Risk Management Specialist. Generate comprehensive risks specifically applicable to {organization_name} located in {location} operating in the {domain} domain.
+
+IMPORTANT: The user has specific risk profiles for different categories. Use the appropriate scales for each risk category:
+
+"""
+        
+        # Add category-specific information to the prompt
+        for risk_type, info in category_info.items():
+            prompt += f"""
+**{risk_type}**:
+- Definition: {info['definition']}
+- Likelihood Scale: {info['likelihood_scale']}
+- Impact Scale: {info['impact_scale']}
+"""
+        
+        # Create the category list for the prompt
+        category_list = "\n".join([f"- {category}" for category in user_categories])
+        total_risks = len(user_categories) * 5
+        
+        prompt += f"""
+
+Generate EXACTLY 5 risks for each of the following categories, using the specific scales provided above:
+{category_list}
+
+For each risk, use the likelihood and impact scales specific to that risk category. The category name must match EXACTLY.
+
+CRITICAL: Return ONLY valid JSON in this exact format. Do not include any other text, explanations, or formatting:
+
+{{
+  "risks": [
+    {{
+      "description": "Clear, detailed description of the risk",
+      "category": "One of the exact categories listed above",
+      "likelihood": "Value from the category's likelihood scale",
+      "impact": "Value from the category's impact scale", 
+      "treatment_strategy": "Specific recommendations to mitigate or manage the risk"
+    }}
+  ]
+}}
+
+Generate EXACTLY {total_risks} risks total (5 per category). Make the risks specific and actionable for {organization_name}.
+
+IMPORTANT: Ensure the JSON is complete and properly formatted. Do not truncate the response."""
+        
+        # Generate risks using OpenAI
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return {"success": False, "message": "OpenAI API key not configured"}
+            
+        client = OpenAI(api_key=api_key)
+        
+        # First attempt with full prompt
+        try:
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=4000
+            )
+        except Exception as e:
+            print(f"First attempt failed: {str(e)}")
+            # Fallback to simpler prompt
+            category_list_simple = ", ".join(user_categories)
+            simple_prompt = f"""Generate {total_risks} risks for {organization_name} in {location} operating in {domain}.
+
+Return ONLY valid JSON in this format:
+{{
+  "risks": [
+    {{
+      "description": "Risk description",
+      "category": "One of the user's categories",
+      "likelihood": "Rare",
+      "impact": "Minor",
+      "treatment_strategy": "Mitigation strategy"
+    }}
+  ]
+}}
+
+Generate 5 risks each for: {category_list_simple}."""
+            
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": simple_prompt}],
+                temperature=0.7,
+                max_tokens=4000
+            )
+        
+        # Parse the response
+        content = response.choices[0].message.content
+        print(f"Raw OpenAI response length: {len(content)}")
+        print(f"Raw OpenAI response preview: {content[:500]}...")
+        
+        try:
+            # Try to find JSON in the response
+            json_start = content.find('{')
+            json_end = content.rfind('}') + 1
+            
+            if json_start != -1 and json_end > json_start:
+                json_str = content[json_start:json_end]
+                print(f"Extracted JSON length: {len(json_str)}")
+                print(f"JSON preview: {json_str[:500]}...")
+                
+                risks_data = json.loads(json_str)
+                
+                if "risks" in risks_data and isinstance(risks_data["risks"], list):
+                    # Validate that we have the expected number of risks
+                    risk_count = len(risks_data["risks"])
+                    expected_min = total_risks * 0.75  # Allow 25% flexibility
+                    if risk_count >= expected_min:
+                        return {
+                            "success": True,
+                            "message": f"Risks generated successfully ({risk_count} risks)",
+                            "data": {
+                                "risks": risks_data["risks"],
+                                "profiles_used": list(category_info.keys())
+                            }
+                        }
+                    else:
+                        return {"success": False, "message": f"Generated only {risk_count} risks, expected at least {expected_min}"}
+                else:
+                    return {"success": False, "message": "Invalid risk data format - missing 'risks' array"}
+            else:
+                return {"success": False, "message": "No valid JSON found in response"}
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error: {str(e)}")
+            print(f"JSON string that failed: {json_str[:1000]}...")
+            return {"success": False, "message": f"Error parsing JSON response: {str(e)}"}
+        except Exception as e:
+            print(f"Unexpected error: {str(e)}")
+            return {"success": False, "message": f"Unexpected error: {str(e)}"}
+            
+    except Exception as e:
+        return {"success": False, "message": f"Error generating risks: {str(e)}"}

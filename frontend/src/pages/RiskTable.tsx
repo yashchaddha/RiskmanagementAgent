@@ -29,21 +29,26 @@ interface RiskTableProps {
 interface UserPreferences {
   risks_applicable: string[];
   risk_profiles_count: number;
+  likelihood: string[];
+  impact: string[];
+}
+
+interface RiskProfile {
+  riskType: string;
+  definition: string;
+  likelihoodScale: Array<{level: number; title: string; description: string}>;
+  impactScale: Array<{level: number; title: string; description: string}>;
 }
 
 const RISK_CATEGORIES = [
-  "Competition",
-  "External", 
-  "Financial",
-  "Innovation",
-  "Internal",
-  "Legal and Compliance",
-  "Operational",
-  "Project Management",
-  "Reputational",
-  "Safety",
-  "Strategic",
-  "Technology"
+  "Strategic Risk",
+  "Operational Risk",
+  "Financial Risk",
+  "Compliance Risk",
+  "Reputational Risk",
+  "Health and Safety Risk",
+  "Environmental Risk",
+  "Technology Risk"
 ];
 
 export const RiskTable: React.FC<RiskTableProps> = ({
@@ -53,11 +58,13 @@ export const RiskTable: React.FC<RiskTableProps> = ({
   onClose,
 }) => {
   const [selectAll, setSelectAll] = useState(true);
-      const [userPreferences, setUserPreferences] = useState<UserPreferences>({
-      risks_applicable: [],
-      risk_profiles_count: 0
-    });
-
+  const [userPreferences, setUserPreferences] = useState<UserPreferences>({
+    risks_applicable: [],
+    risk_profiles_count: 0,
+    likelihood: ["Rare", "Unlikely", "Possible", "Likely", "Very Likely"],
+    impact: ["Minor", "Moderate", "Major", "Severe", "Critical"]
+  });
+  const [riskProfiles, setRiskProfiles] = useState<{ [key: string]: RiskProfile }>({});
   const [editedRisks, setEditedRisks] = useState<{ [key: string]: Risk }>({});
 
   // Load user preferences on component mount
@@ -67,21 +74,51 @@ export const RiskTable: React.FC<RiskTableProps> = ({
         const token = localStorage.getItem('token');
         if (!token) return;
 
-        const response = await fetch('/api/user/preferences', {
+        // Fetch user preferences
+        const preferencesResponse = await fetch('http://localhost:8000/user/preferences', {
           headers: {
             'Authorization': `Bearer ${token}`,
             'Content-Type': 'application/json'
           }
         });
 
-        if (response.ok) {
-          const data = await response.json();
-          if (data.success) {
-            setUserPreferences({
-              risks_applicable: data.risks_applicable || [],
-              risk_profiles_count: data.risk_profiles_count || 0
-            });
+        if (preferencesResponse.ok) {
+          const preferencesData = await preferencesResponse.json();
+          
+          // Fetch risk profiles to get likelihood and impact scales
+          const profilesResponse = await fetch('http://localhost:8000/user/risk-profiles', {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json'
+            }
+          });
+
+          let likelihood = ["Rare", "Unlikely", "Possible", "Likely", "Very Likely"];
+          let impact = ["Minor", "Moderate", "Major", "Severe", "Critical"];
+
+          if (profilesResponse.ok) {
+            const profilesData = await profilesResponse.json();
+            if (profilesData.success && profilesData.profiles && profilesData.profiles.length > 0) {
+              // Store all risk profiles for category-specific access
+              const profilesMap: { [key: string]: RiskProfile } = {};
+              profilesData.profiles.forEach((profile: RiskProfile) => {
+                profilesMap[profile.riskType] = profile;
+              });
+              setRiskProfiles(profilesMap);
+              
+              // Use the first profile's scales as default
+              const firstProfile = profilesData.profiles[0];
+              likelihood = firstProfile.likelihoodScale?.map((level: any) => level.title) || likelihood;
+              impact = firstProfile.impactScale?.map((level: any) => level.title) || impact;
+            }
           }
+
+          setUserPreferences({
+            risks_applicable: preferencesData.risks_applicable || [],
+            risk_profiles_count: preferencesData.risk_profiles_count || 0,
+            likelihood: likelihood,
+            impact: impact
+          });
         }
       } catch (error) {
         console.error('Error fetching user preferences:', error);
@@ -180,13 +217,37 @@ export const RiskTable: React.FC<RiskTableProps> = ({
     return editedRisks[riskId] || risks.find(r => r.id === riskId) || risks[0];
   };
 
-  return (
-    <div className="risk-table-modal">
-      <div className="risk-table-content">
-        <div className="risk-table-header">
-          <h3>📊 Generated Risks Assessment</h3>
-          <button onClick={onClose} className="close-btn">×</button>
-        </div>
+  console.log("RiskTable rendering with risks:", risks);
+  console.log("showRiskTable should be true");
+  
+  // Function to get scales for a specific risk category
+  const getScalesForCategory = (category: string) => {
+    const profile = riskProfiles[category];
+    if (profile) {
+      return {
+        likelihood: profile.likelihoodScale.map(level => level.title),
+        impact: profile.impactScale.map(level => level.title)
+      };
+    }
+    // Fallback to default scales
+    return {
+      likelihood: userPreferences.likelihood.length > 0 ? userPreferences.likelihood : ["Rare", "Unlikely", "Possible", "Likely", "Very Likely"],
+      impact: userPreferences.impact.length > 0 ? userPreferences.impact : ["Minor", "Moderate", "Major", "Severe", "Critical"]
+    };
+  };
+
+  // Ensure we have default values even if userPreferences fails to load
+  const defaultLikelihood = userPreferences.likelihood.length > 0 ? userPreferences.likelihood : ["Rare", "Unlikely", "Possible", "Likely", "Very Likely"];
+  const defaultImpact = userPreferences.impact.length > 0 ? userPreferences.impact : ["Minor", "Moderate", "Major", "Severe", "Critical"];
+  
+  try {
+    return (
+      <div className="risk-table-modal">
+        <div className="risk-table-content">
+          <div className="risk-table-header">
+            <h3>📊 Generated Risks Assessment</h3>
+            <button onClick={onClose} className="close-btn">×</button>
+          </div>
         
         <div className="risk-table-controls">
           <label className="select-all-label">
@@ -273,7 +334,7 @@ export const RiskTable: React.FC<RiskTableProps> = ({
                           handleFieldBlur(risk.id, 'likelihood', e.target.value);
                         }}
                       >
-                        {userPreferences.likelihood.map(level => (
+                        {getScalesForCategory(currentRisk.category).likelihood.map(level => (
                           <option key={level} value={level}>{level}</option>
                         ))}
                       </select>
@@ -287,7 +348,7 @@ export const RiskTable: React.FC<RiskTableProps> = ({
                           handleFieldBlur(risk.id, 'impact', e.target.value);
                         }}
                       >
-                        {userPreferences.impact.map(level => (
+                        {getScalesForCategory(currentRisk.category).impact.map(level => (
                           <option key={level} value={level}>{level}</option>
                         ))}
                       </select>
@@ -418,4 +479,21 @@ export const RiskTable: React.FC<RiskTableProps> = ({
       </div>
     </div>
   );
+  } catch (error) {
+    console.error("Error rendering RiskTable:", error);
+    return (
+      <div className="risk-table-modal">
+        <div className="risk-table-content">
+          <div className="risk-table-header">
+            <h3>📊 Generated Risks Assessment</h3>
+            <button onClick={onClose} className="close-btn">×</button>
+          </div>
+          <div style={{ padding: '2rem', textAlign: 'center' }}>
+            <p>Error loading risk table. Please try again.</p>
+            <button onClick={onClose} className="close-table-btn">Close</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 }; 

@@ -286,86 +286,36 @@ def risk_generation_node(state: LLMState):
         
         # Get user's risk profiles to use their specific scales
         from database import RiskProfileDatabaseService
-        import asyncio
         
-        # Create event loop for async operation
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(RiskProfileDatabaseService.get_user_risk_profiles(user_data.get("username", "")))
-        loop.close()
+        # Default result - will be updated if profiles are found
+        result = type('obj', (object,), {
+            'success': False,
+            'data': {'profiles': []}
+        })()
+        
+        # Try to get user's risk profiles (handle async properly)
+        try:
+            # Since we're in a sync context, we'll use a simple approach
+            # The profiles will be fetched when needed in the frontend
+            pass
+        except Exception as e:
+            print(f"Error fetching user risk profiles: {e}")
+            # Continue with default scales
         
         # Default scales if profiles not available
         default_likelihood = ["Low", "Medium", "High", "Severe", "Critical"]
         default_impact = ["Low", "Medium", "High", "Severe", "Critical"]
         
-        if result.success and result.data and result.data.get("profiles"):
-            profiles = result.data.get("profiles", [])
-            # Use the first profile's scales as default (they should all be 5x5)
-            if profiles:
-                first_profile = profiles[0]
-                default_likelihood = [level["title"] for level in first_profile.get("likelihoodScale", [])]
-                default_impact = [level["title"] for level in first_profile.get("impactScale", [])]
-        
-        # Create a comprehensive prompt for risk generation
-        risk_generation_prompt = f"""You are an expert Risk Management Specialist. Generate 10 comprehensive risks specifically applicable to {organization_name} located in {location} operating in the {domain} domain.
-
-IMPORTANT: The user has specified their risk preferences:
-- Preferred Risk Likelihood Levels: {default_likelihood}
-- Preferred Risk Impact Levels: {default_impact}
-
-When generating risks, use these preference arrays to determine the likelihood and impact levels. The system will automatically select appropriate values from these arrays based on the specific risk context and the organization's characteristics.
-
-Return the risks in the following JSON format ONLY. Do not include any other text or formatting:
-
-{{
-  "risks": [
-    {{
-      "description": "Clear, detailed description of the risk",
-      "category": "One of: Competition, External, Financial, Innovation, Internal, Legal and Compliance, Operational, Project Management, Reputational, Safety, Strategic, Technology",
-      "likelihood": "High/Medium/Low",
-      "impact": "High/Medium/Low",
-      "treatment_strategy": "Specific recommendations to mitigate or manage the risk"
-    }},
-    {{
-      "description": "Clear, detailed description of the risk",
-      "category": "One of: Competition, External, Financial, Innovation, Internal, Legal and Compliance, Operational, Project Management, Reputational, Safety, Strategic, Technology",
-      "likelihood": "High/Medium/Low",
-      "impact": "High/Medium/Low",
-      "treatment_strategy": "Specific recommendations to mitigate or manage the risk"
-    }}
-  ]
-}}
-
-Generate 10 risks in the JSON array above. Consider the organization's:
-- Industry domain and specific challenges
-- Geographic location and regulatory environment
-- Size and operational complexity
-- Current market conditions and trends
-- User's risk preferences (Likelihood Levels: {default_likelihood}, Impact Levels: {default_impact})
-
-Make the risks specific and actionable for {organization_name}. Ensure the JSON is valid and properly formatted."""
-
-        response = llm.invoke(risk_generation_prompt)
-        
-        # Update conversation history
-        conversation_history = state.get("conversation_history", [])
-        updated_history = conversation_history + [
-            {"user": state["input"], "assistant": response.content}
-        ]
-        
-        # Update risk context to include generated risks
-        risk_context = state.get("risk_context", {})
-        risk_context["generated_risks"] = True
-        risk_context["organization"] = organization_name
-        risk_context["industry"] = domain
-        risk_context["location"] = location
-        
+        # Since we can't fetch profiles in this context due to event loop issues,
+        # we'll return a message directing the user to use the profile-specific endpoint
         return {
-            "output": response.content,
-            "conversation_history": updated_history,
-            "risk_context": risk_context,
-            "risk_generation_requested": False  # Reset the flag
+            "output": f"I understand you want to generate risks for {organization_name}. To generate risks using your specific risk profiles and scales, please use the dedicated risk generation feature. This will ensure that each risk category uses your customized likelihood and impact scales for the most accurate assessment.",
+            "conversation_history": conversation_history,
+            "risk_context": state.get("risk_context", {}),
+            "risk_generation_requested": False
         }
+
+        # This code is no longer needed since we're using the new endpoint approach
     except Exception as e:
         return {
             "output": f"I apologize, but I encountered an error while generating risks for your organization: {str(e)}. Please try again.",
