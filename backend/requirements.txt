@@ -5,6 +5,7 @@ fastapi
 uvicorn
 python-multipart
 langchain-openai
+langchain
 langgraph
 python-dotenv
 typing-extensions 

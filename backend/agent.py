@@ -1,9 +1,17 @@
 import os
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
+from langchain.schema import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
+from dependencies import get_llm
 import json
+
+# Try to import the ISO knowledge, fallback to empty dict if import fails
+try:
+    from knowledge_base import ISO_27001_KNOWLEDGE
+except ImportError:
+    print("Warning: Could not import ISO_27001_KNOWLEDGE, using empty dict instead")
+    ISO_27001_KNOWLEDGE = {}
 
 # Load environment variables from .env
 load_dotenv()
@@ -20,15 +28,14 @@ class LLMState(TypedDict):
     risk_register_requested: bool  # Flag to indicate if risk register access is needed
     risk_profile_requested: bool  # Flag to indicate if risk profile access is needed
     matrix_recommendation_requested: bool  # Flag to indicate if matrix recommendation is needed
+    is_audit_related: bool  # Flag to indicate if query is audit-related
+    is_risk_related: bool  # Flag to indicate if query is risk-related
 
-# 2. Define the LLM node
-def llm_node(state: LLMState):
+# 2. Define the risk node
+def risk_node(state: LLMState):
+    print("Risk Node Activated")
     try:
-        llm = ChatOpenAI(
-            model="gpt-3.5-turbo",
-            temperature=0.7,
-            max_tokens=800
-        )
+        llm = get_llm()
         
         user_input = state["input"]
         conversation_history = state.get("conversation_history", [])
@@ -271,12 +278,9 @@ def llm_node(state: LLMState):
 # 3. Define the risk generation node
 def risk_generation_node(state: LLMState):
     """Generate organization-specific risks based on user data"""
+    print("Risk Generation Node Activated")
     try:
-        llm = ChatOpenAI(
-            model="gpt-3.5-turbo",
-            temperature=0.7,
-            max_tokens=1500
-        )
+        llm = get_llm()
         
         user_data = state.get("user_data", {})
         organization_name = user_data.get("organization_name", "the organization")
@@ -373,13 +377,10 @@ Make the risks specific and actionable for {organization_name}. Ensure the JSON 
 # 4. Define the preference update node
 def risk_register_node(state: LLMState):
     """Handle risk register access requests"""
+    print("Risk Register Node Activated")
     try:
-        llm = ChatOpenAI(
-            model="gpt-3.5-turbo",
-            temperature=0.7,
-            max_tokens=400
-        )
-        
+        llm = get_llm()
+
         user_input = state["input"]
         conversation_history = state.get("conversation_history", [])
         risk_context = state.get("risk_context", {})
@@ -429,13 +430,10 @@ Response:"""
 
 def preference_update_node(state: LLMState):
     """Handle user preference updates for risk profiles"""
+    print("Preference Update Node Activated")
     try:
-        llm = ChatOpenAI(
-            model="gpt-3.5-turbo",
-            temperature=0.7,
-            max_tokens=800
-        )
-        
+        llm = get_llm()
+
         user_input = state["input"]
         user_data = state.get("user_data", {})
         
@@ -545,6 +543,7 @@ Your risk preferences are now managed through individual risk profiles. You curr
 # 4. Define the risk profile node
 def risk_profile_node(state: LLMState):
     """Handle risk profile requests and display user's risk categories and scales"""
+    print("Risk Profile Node Activated")
     try:
         user_input = state["input"]
         user_data = state.get("user_data", {})
@@ -613,6 +612,7 @@ To generate risks using these profiles, simply ask me to "generate risks" or "re
 # 5. Define the matrix recommendation node
 def matrix_recommendation_node(state: LLMState):
     """Handle matrix recommendation requests and create appropriate risk profiles"""
+    print("Matrix Recommendation Node Activated")
     try:
         user_input = state["input"]
         user_data = state.get("user_data", {})
@@ -676,8 +676,7 @@ The risk profile table will show you all categories with their {matrix_size} ass
 
 def update_risk_context(current_context: dict, user_input: str, assistant_response: str) -> dict:
     """Update risk context based on conversation"""
-    # This is a simplified version - in a production system, you might use
-    # more sophisticated NLP to extract and update context
+    print("Updating Risk Context")
     context = current_context.copy()
     
     # Extract organization and industry mentions
@@ -700,15 +699,295 @@ def update_risk_context(current_context: dict, user_input: str, assistant_respon
     
     return context
 
-# 5. Build the graph with the state schema
+def orchestrator_node(state: LLMState) -> LLMState:
+    """Node responsible for routing user queries to relevant nodes based on intent classification"""
+    print("Orchestrator Activated")
+    system_prompt = """
+You are an intelligent orchestrator agent responsible for classifying user queries and routing them to the appropriate specialized nodes.
+
+Your task is to analyze the user's query and determine which node should handle it based on the intent.
+
+INTENT CLASSIFICATION RULES:
+
+1. AUDIT-RELATED QUERIES: Route to "audit_facilitator" if the query is about:
+   - Organization audits
+   - Audit processes
+   - Audit findings
+   - Audit reports
+   - Audit compliance
+   - Audit procedures
+   - Audit standards
+   - Internal audits
+   - External audits
+   - Audit documentation
+
+2. ISO 27001 QUERIES: Route to "knowledge_node" if the query is about:
+   - ISO 27001:2022 standard
+   - Information security management
+   - ISMS requirements
+   - ISO clauses and controls
+   - Annex A controls
+   - ISO compliance
+   - Information security policies
+   - Risk management (as it pertains to ISO requirements)
+   - Security controls
+
+3. RISK-RELATED QUERIES: Route to "risk_node" if the query is about:
+   - Risk assessments and analysis
+   - Risk registers and risk entries
+   - Risk scoring or risk matrices
+   - Risk treatment and mitigation plans
+   - Risk generation or identification processes
+   - Updating or maintaining risk profiles
+   - Risk appetite and tolerance
+   - Risk matrix recommendations and prioritization
+   - Preference updates related to risk processes
+   - Any node-specific risk operations such as risk_generation, preference_update, risk_register, risk_profile, matrix_recommendation
+
+FEW-SHOT EXAMPLES:
+
+User: "What are the audit findings from last quarter?"
+Intent: AUDIT-RELATED
+Route to: audit_facilitator
+
+User: "Explain Clause 5.2 of ISO 27001"
+Intent: ISO 27001
+Route to: knowledge_node
+
+User: "I want to start the audit"
+Intent: AUDIT-RELATED
+Route to: audit_facilitator
+
+User: "What is Annex A.5.23?"
+Intent: ISO 27001
+Route to: knowledge_node
+
+User: "Show all my audits?"
+Intent: AUDIT-RELATED
+Route to: audit_facilitator
+
+User: "What are the leadership requirements in ISO 27001?"
+Intent: ISO 27001
+Route to: knowledge_node
+
+User: "Review our audit documentation"
+Intent: AUDIT-RELATED
+Route to: audit_facilitator
+
+User: "Explain the risk treatment process in ISO 27001"
+Intent: ISO 27001
+Route to: knowledge_node
+
+User: "Create a new risk entry in the risk register"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "How do I score and prioritize risks using a risk matrix?"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "Generate risks for the new project scope"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "Update my risk appetite and preferences"
+Intent: RISK-RELATED
+Route to: risk_node
+
+OUTPUT FORMAT:
+You MUST return EXACTLY one of these three strings (nothing else):
+- audit_facilitator
+- knowledge_node
+- risk_node
+
+Do NOT return any other text, explanations, or formatting. Return ONLY the node name.
+"""
+    
+    user_input = state["input"]
+    conversation_history = state.get("conversation_history", [])
+    risk_context = state.get("risk_context", {})
+    user_data = state.get("user_data", {})
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_input)
+    ]
+    
+    try:
+        llm = get_llm()
+        response = llm.invoke(messages)
+        routing_decision = response.content.strip().lower()
+        
+        # Validate the routing decision and set appropriate flags
+        if "audit_facilitator" in routing_decision:
+            return {
+                "input": state["input"],
+                "output": "",
+                "conversation_history": conversation_history,
+                "risk_context": risk_context,
+                "user_data": user_data,
+                "risk_generation_requested": False,
+                "preference_update_requested": False,
+                "risk_register_requested": False,
+                "risk_profile_requested": False,
+                "matrix_recommendation_requested": False,
+                "is_audit_related": True,
+                "is_risk_related": False
+            }
+        elif "risk_node" in routing_decision:
+            return {
+                "input": state["input"],
+                "output": "",
+                "conversation_history": conversation_history,
+                "risk_context": risk_context,
+                "user_data": user_data,
+                "risk_generation_requested": False,
+                "preference_update_requested": False,
+                "risk_register_requested": False,
+                "risk_profile_requested": False,
+                "matrix_recommendation_requested": False,
+                "is_audit_related": False,
+                "is_risk_related": True
+            }
+        else:
+            # Default to ISO auditor for any unrecognized response
+            print(f"Unrecognized routing decision: '{routing_decision}', defaulting to knowledge_node")
+            return {
+                "input": state["input"],
+                "output": "",
+                "conversation_history": conversation_history,
+                "risk_context": risk_context,
+                "user_data": user_data,
+                "risk_generation_requested": False,
+                "preference_update_requested": False,
+                "risk_register_requested": False,
+                "risk_profile_requested": False,
+                "matrix_recommendation_requested": False,
+                "is_audit_related": False,
+                "is_risk_related": False,
+                "is_knowledge_related": True
+            }
+    except Exception as e:
+        print(f"Error in orchestrator: {e}")
+        # Default to ISO auditor if classification fails
+        return {
+            "input": state["input"],
+            "output": "",
+            "conversation_history": conversation_history,
+            "risk_context": risk_context,
+            "user_data": user_data,
+            "risk_generation_requested": False,
+            "preference_update_requested": False,
+            "risk_register_requested": False,
+            "risk_profile_requested": False,
+            "matrix_recommendation_requested": False,
+            "is_audit_related": False,
+            "is_risk_related": False,
+            "is_knowledge_related": True
+        }
+
+
+# 5. Define the knowledge node
+def knowledge_node(state: LLMState):
+    """Node for handling ISO 27001 and information security knowledge-related queries"""
+    print("Knowledge Node Activated")
+    try:
+        llm = get_llm()
+        
+        user_input = state["input"]
+        conversation_history = state.get("conversation_history", [])
+        risk_context = state.get("risk_context", {})
+        user_data = state.get("user_data", {})
+# SOURCE OF TRUTH (read-only)
+# ${ISO_27001_KNOWLEDGE_CONTENT}
+
+# Replacing with placeholder - actual content will be injected if available
+        system_prompt = f"""
+ROLE
+You are an ISO/IEC 27001:2022 assistant. For any question about ISO 27001:2022 clauses, subclauses, or Annex A controls, you MUST answer strictly from the structured dataset provided below. For general questions about ISO 27001:2022 (not asking for specific clause/control text), you should still answer—succinctly—using general ISO knowledge, and, when helpful, point to the most relevant entries in the dataset.
+
+SOURCE OF TRUTH (read-only)
+{ISO_27001_KNOWLEDGE}
+# The above JSON is the canonical dataset. Do not invent entries, numbers, or text that are not present here.
+
+SCOPE & ROUTING
+1) If the user asks about a specific clause number (e.g., "5", "5.2", "Clause 7.5", "6.1.3"):
+   - Look it up under ISO27001_2022 → Clauses.
+   - If a top-level clause (4-10) is requested, return its id, title, description, and list all subclauses with ids + titles from the dataset.
+   - If a subclause is requested, return its id + title; if the dataset lacks a description for that subclause provide one from your end, it should be relevant to that subclause title
+
+2) If the user asks about Annex A (e.g., "A.5", "A.8.24", "Annex A technological controls"):
+   - Look it up under ISO27001_2022 → Annex_A.
+   - If an Annex A domain (A.5-A.8) is requested, return its id, title, description, and list all control ids + titles (with descriptions if present).
+   - If a specific control (e.g., A.5.23, A.8.11) is requested, return the control id, title, description, and the parent domain (id + title).
+
+3) If the question is generally related to ISO/IEC 27001:2022 but not specifically about clauses/Annex A (e.g., "What is ISO 27001:2022?", "How does certification work?", "What is risk treatment?"):
+   - Provide a concise answer based on general ISO knowledge.
+   - When relevant, add a short "See also" section pointing to applicable clauses/subclauses or Annex A domains/controls from the dataset.
+
+4) If the question is completely unrelated to ISO/IEC 27001:2022 (e.g., general conversation, other topics):
+   - Politely redirect the user to ask ISO 27001:2022 related questions.
+   - Example: "I'm specialized in ISO/IEC 27001:2022 compliance guidance. Please ask me questions about information security management systems, ISO 27001 clauses, Annex A controls, or related compliance topics."
+
+5) If the user asks for something not found in the dataset (e.g., an id that doesn't exist in the JSON):
+   - Say you couldn't find that exact id in the provided dataset and offer the nearest relevant entries (e.g., the parent clause/domain) if applicable.
+   - Do NOT fabricate ids, titles, or descriptions.
+
+MATCHING & NORMALIZATION
+- Treat inputs like "clause 5.2", "5.2", "Leadership policy", or "information security policy" as potential matches to dataset items (e.g., 5.2 → "Information security policy"; "information security policy" → likely 5.2 or A.5.1 depending on context).
+- Normalize spacing, case, and punctuation. Accept both "Annex A 8.24" and "A.8.24".
+- Prefer exact id matches first; if none, resolve by best title/keyword match and explain mapping in one short sentence ("Interpreting '…' as …").
+
+
+        """
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_input)
+        ]
+        response = llm.invoke(messages)
+
+        # Update conversation history
+        updated_history = conversation_history + [
+            {"user": user_input, "assistant": response.content}
+        ]
+        
+        return {
+            "output": response.content,
+            "conversation_history": updated_history,
+            "risk_context": risk_context,
+            "user_data": user_data
+        }
+    except Exception as e:
+        return {
+            "output": f"I apologize, but I encountered an error while processing your information security query: {str(e)}. Please try again.",
+            "conversation_history": state.get("conversation_history", []),
+            "risk_context": state.get("risk_context", {}),
+            "user_data": state.get("user_data", {})
+        }
+
+# 6. Build the graph with the state schema
 builder = StateGraph(LLMState)
-builder.add_node("llm", llm_node)
+builder.add_node("orchestrator", orchestrator_node)
+builder.add_node("risk_node", risk_node)
 builder.add_node("risk_generation", risk_generation_node)
 builder.add_node("preference_update", preference_update_node)
 builder.add_node("risk_register", risk_register_node)
 builder.add_node("risk_profile", risk_profile_node)
 builder.add_node("matrix_recommendation", matrix_recommendation_node)
-builder.set_entry_point("llm")
+builder.add_node("knowledge_node", knowledge_node)
+builder.set_entry_point("orchestrator")
+
+# Add conditional routing from orchestrator
+def orchestrator_routing(state: LLMState) -> str:
+    if state.get("is_audit_related", False):
+        return "audit_facilitator"  # Will be implemented later
+    elif state.get("is_risk_related", False):
+        return "risk_node"
+    elif state.get("is_control_related", False):
+        return "control_node"
+    elif state.get("is_knowledge_related", False):
+        return "knowledge_node"
+    else:
+        return "knowledge_node"  # Default to existing LLM node for risk management queries
 
 # Add conditional edge based on risk generation flag
 def should_generate_risks(state: LLMState) -> str:
@@ -724,7 +1003,14 @@ def should_generate_risks(state: LLMState) -> str:
         return "matrix_recommendation"
     return "end"
 
-builder.add_conditional_edges("llm", should_generate_risks, {
+# Add orchestrator routing
+builder.add_conditional_edges("orchestrator", orchestrator_routing, {
+    "audit_facilitator": "risk_node",  # Temporary routing to risk_node until audit_facilitator is implemented
+    "knowledge_node": "knowledge_node",  # Route to knowledge node for ISO 27001 related queries
+    "risk_node": "risk_node"
+})
+
+builder.add_conditional_edges("risk_node", should_generate_risks, {
     "risk_generation": "risk_generation",
     "preference_update": "preference_update",
     "risk_register": "risk_register",
@@ -737,6 +1023,7 @@ builder.add_edge("preference_update", END)
 builder.add_edge("risk_register", END)
 builder.add_edge("risk_profile", END)
 builder.add_edge("matrix_recommendation", END)
+builder.add_edge("knowledge_node", END)
 
 graph = builder.compile()
 
@@ -758,7 +1045,9 @@ def run_agent(message: str, conversation_history: list = None, risk_context: dic
         "preference_update_requested": False,
         "risk_register_requested": False,
         "risk_profile_requested": False,
-        "matrix_recommendation_requested": False
+        "matrix_recommendation_requested": False,
+        "is_audit_related": False,
+        "is_risk_related": False
     }
     result = graph.invoke(state)
     return result["output"], result["conversation_history"], result["risk_context"], result["user_data"]
@@ -766,12 +1055,8 @@ def run_agent(message: str, conversation_history: list = None, risk_context: dic
 def get_risk_assessment_summary(conversation_history: list, risk_context: dict) -> str:
     """Generate a summary of the risk assessment session"""
     try:
-        llm = ChatOpenAI(
-            model="gpt-3.5-turbo",
-            temperature=0.5,
-            max_tokens=500
-        )
-        
+        llm = get_llm()
+
         # Format conversation for summary
         conversation_text = "\n".join([
             f"User: {msg['user']}\nAssistant: {msg['assistant']}" 
@@ -799,12 +1084,8 @@ def get_risk_assessment_summary(conversation_history: list, risk_context: dict) 
 def get_finalized_risks_summary(finalized_risks: list, organization_name: str, location: str, domain: str) -> str:
     """Generate a comprehensive summary based on finalized risks"""
     try:
-        llm = ChatOpenAI(
-            model="gpt-3.5-turbo",
-            temperature=0.3,
-            max_tokens=800
-        )
-        
+        llm = get_llm()
+
         # Format finalized risks for summary
         risks_text = ""
         for i, risk in enumerate(finalized_risks, 1):

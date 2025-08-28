@@ -57,7 +57,7 @@ class FinalizedRisk(BaseModel):
     updated_at: Optional[datetime] = None
 
 class FinalizedRisks(BaseModel):
-    id: Optional[str] = None
+    id: Optional[str] = None  # MongoDB _id for this collection
     user_id: str
     organization_name: str
     location: str
