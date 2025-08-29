@@ -691,36 +691,166 @@ To generate risks using these profiles, simply ask me to "generate risks" or "re
 
 # 5. Define the matrix recommendation node
 def matrix_recommendation_node(state: LLMState):
-    """Handle matrix recommendation requests and create appropriate risk profiles"""
+    """Handle matrix recommendation requests and create appropriate risk profiles using LLM"""
     print("Matrix Recommendation Node Activated")
     try:
         user_input = state["input"]
         user_data = state.get("user_data", {})
         matrix_size = state.get("matrix_size", "5x5")
         
-        response_text = f"""🎯 **{matrix_size} Risk Matrix Recommendation**
+        # Get organization context from user_data
+        organization_name = user_data.get("organization_name", "your organization")
+        location = user_data.get("location", "your location")
+        domain = user_data.get("domain", "your industry")
+        
+        print(f"Creating {matrix_size} matrix recommendation for {organization_name} in {location}, {domain} domain")
+        
+        # Use LLM to generate context-specific matrix recommendation
+        llm = get_llm()
+        
+        # Create prompt for LLM to generate matrix scales
+        prompt = f"""You are an expert Risk Management Specialist. Generate a {matrix_size} risk matrix specifically tailored for {organization_name} located in {location} operating in the {domain} domain.
 
-I'll create a comprehensive {matrix_size} risk assessment framework for your organization!
+Create likelihood and impact scales that are relevant to this organization's specific context, industry, and location.
 
-**Matrix Configuration:**
-• **Matrix Size**: {matrix_size} (Levels 1-{matrix_size.split('x')[0]})
-• **Risk Categories**: 8 specialized categories
-• **Assessment Scales**: Customized likelihood and impact scales
+Return ONLY valid JSON in this exact format:
 
-**Recommended Risk Categories:**
-1. **Strategic Risk** - Long-term business objectives and market positioning
-2. **Operational Risk** - Day-to-day business processes and efficiency
-3. **Financial Risk** - Financial performance, cash flow, and investments
-4. **Compliance Risk** - Regulatory requirements and legal obligations
-5. **Reputational Risk** - Brand image and stakeholder perception
-6. **Health and Safety Risk** - Employee and public safety
-7. **Environmental Risk** - Environmental impact and sustainability
-8. **Technology Risk** - IT systems, cybersecurity, and digital transformation
+{{
+  "matrix_scales": {{
+    "likelihood": [
+      {{"level": 1, "title": "Scale Title", "description": "Detailed description"}},
+      {{"level": 2, "title": "Scale Title", "description": "Detailed description"}},
+      {{"level": 3, "title": "Scale Title", "description": "Detailed description"}}
+    ],
+    "impact": [
+      {{"level": 1, "title": "Scale Title", "description": "Detailed description"}},
+      {{"level": 2, "title": "Scale Title", "description": "Detailed description"}},
+      {{"level": 3, "title": "Scale Title", "description": "Detailed description"}}
+    ]
+  }},
+  "risk_categories": [
+    {{
+      "riskType": "Strategic Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Operational Risk", 
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Financial Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Compliance Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Reputational Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Health and Safety Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Environmental Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }},
+    {{
+      "riskType": "Technology Risk",
+      "definition": "Context-specific definition for {organization_name}"
+    }}
+  ]
+}}
+
+For {matrix_size} matrix:
+- Likelihood scale should have {matrix_size.split('x')[0]} levels
+- Impact scale should have {matrix_size.split('x')[1]} levels
+- Make scales relevant to {domain} industry and {location} location
+- Ensure descriptions are specific to {organization_name}'s context
+- Use appropriate terminology for the industry and region
+
+IMPORTANT: Return ONLY valid JSON. Do not include any other text."""
+
+        print("Generating matrix recommendation with LLM...")
+        messages = [
+            SystemMessage(content=prompt)
+        ]
+        
+        response = llm.invoke(messages)
+        content = response.content.strip()
+        
+        print(f"LLM response received: {content[:100]}...")
+        
+        # Extract JSON from response
+        import json
+        json_start = content.find('{')
+        json_end = content.rfind('}') + 1
+        
+        if json_start != -1 and json_end > json_start:
+            json_str = content[json_start:json_end]
+            try:
+                data = json.loads(json_str)
+                
+                if "matrix_scales" in data and "risk_categories" in data:
+                    # Format the response with the LLM-generated data
+                    response_text = f"""🎯 **{matrix_size} Risk Matrix Recommendation for {organization_name}**
+
+I've created a comprehensive {matrix_size} risk assessment framework specifically tailored for {organization_name} in {location}!
+
+**Customized Matrix Configuration:**
+• **Matrix Size**: {matrix_size} ({matrix_size.split('x')[0]} likelihood × {matrix_size.split('x')[1]} impact levels)
+• **Industry Focus**: {domain} sector
+• **Location Context**: {location}
+• **Risk Categories**: 8 specialized categories with context-specific definitions
+
+**Likelihood Scale:**"""
+                    
+                    for level in data["matrix_scales"]["likelihood"]:
+                        response_text += f"\n{level['level']}. **{level['title']}**: {level['description']}"
+                    
+                    response_text += "\n\n**Impact Scale:**"
+                    for level in data["matrix_scales"]["impact"]:
+                        response_text += f"\n{level['level']}. **{level['title']}**: {level['description']}"
+                    
+                    response_text += "\n\n**Customized Risk Categories:**"
+                    for i, category in enumerate(data["risk_categories"], 1):
+                        response_text += f"\n{i}. **{category['riskType']}**: {category['definition']}"
+                    
+                    response_text += f"""
+
+**Key Features:**
+✅ Industry-specific terminology and scales
+✅ Location-appropriate regulatory considerations
+✅ Context-aware risk definitions
+✅ Scalable {matrix_size} assessment framework
 
 **Next Steps:**
-I'll open the risk profile dashboard where you can review and customize the {matrix_size} matrix for each category. You can then edit the likelihood and impact scales to match your organization's specific needs.
+The risk profile dashboard will open with these customized scales. You can:
+• Review and further customize each category
+• Adjust scale definitions to match your specific needs
+• Apply this framework to start generating risks
 
-The risk profile table will show you all categories with their {matrix_size} assessment scales ready for customization."""
+This tailored approach ensures your risk assessments are relevant to {organization_name}'s unique context in the {domain} industry."""
+
+                    print("Matrix recommendation generated successfully")
+                    
+                    # Store the generated matrix data for potential use
+                    risk_context = state.get("risk_context", {})
+                    risk_context["generated_matrix"] = data
+                    risk_context["matrix_size"] = matrix_size
+                    
+                else:
+                    print("Invalid LLM response format, falling back to default")
+                    response_text = f"I've created a {matrix_size} risk matrix framework. The risk profile dashboard will show you the standard risk categories with customizable scales."
+                    
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error: {e}, falling back to default")
+                response_text = f"I've prepared a {matrix_size} risk matrix framework for you. The risk profile dashboard will allow you to customize the scales and categories."
+        else:
+            print("No valid JSON found in LLM response, falling back to default")
+            response_text = f"I've created a {matrix_size} risk assessment framework. You can customize the scales through the risk profile dashboard."
         
         # Update conversation history
         conversation_history = state.get("conversation_history", [])
@@ -731,7 +861,7 @@ The risk profile table will show you all categories with their {matrix_size} ass
         return {
             "output": response_text,
             "conversation_history": updated_history,
-            "risk_context": state.get("risk_context", {}),
+            "risk_context": risk_context,  # Use the updated risk_context instead of getting it again
             "user_data": user_data,
             "risk_generation_requested": False,
             "preference_update_requested": False,
@@ -742,8 +872,11 @@ The risk profile table will show you all categories with their {matrix_size} ass
         }
         
     except Exception as e:
+        print(f"Error in matrix_recommendation_node: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {
-            "output": f"I apologize, but I encountered an error while creating the matrix recommendation: {str(e)}. Please try again.",
+            "output": f"I apologize, but I encountered an error while creating the matrix recommendation: {str(e)}. I'll create a standard {state.get('matrix_size', '5x5')} framework for you instead.",
             "conversation_history": state.get("conversation_history", []),
             "risk_context": state.get("risk_context", {}),
             "user_data": state.get("user_data", {}),
