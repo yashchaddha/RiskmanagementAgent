@@ -43,6 +43,7 @@ export const MatrixPreviewModal: React.FC<MatrixPreviewModalProps> = ({
   // Initialize profiles when matrixData changes
   React.useEffect(() => {
     if (matrixData) {
+      console.log("MatrixPreviewModal received data:", matrixData);
       setProfiles(matrixData.profiles.map(profile => ({ ...profile, isEditing: false })));
     }
   }, [matrixData]);
@@ -54,6 +55,7 @@ export const MatrixPreviewModal: React.FC<MatrixPreviewModalProps> = ({
   const handleApplyMatrix = async () => {
     setIsApplying(true);
     try {
+      console.log("MatrixPreviewModal calling onApplyMatrix with:", { matrix_size: matrixData.matrix_size, profiles });
       await onApplyMatrix(matrixData.matrix_size, profiles);
       onClose();
     } catch (error) {

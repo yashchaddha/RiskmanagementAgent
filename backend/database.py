@@ -1616,7 +1616,7 @@ IMPORTANT: Return ONLY valid JSON. Do not include any other text."""
                     
                     return DatabaseResult(True, "Matrix recommendation generated successfully", {
                         "profiles": preview_profiles,
-                        "matrixSize": matrix_size,
+                        "matrix_size": matrix_size,
                         "totalProfiles": len(preview_profiles)
                     })
                 else:

@@ -42,66 +42,181 @@ def risk_node(state: LLMState):
         risk_context = state.get("risk_context", {})
         user_data = state.get("user_data", {})
         
-        # First, check if this is a risk generation request
-        risk_generation_keywords = [
-            "generate risks", "recommend risks", "identify risks", "list risks",
-            "what risks", "risk assessment", "risk analysis", "risk evaluation",
-            "create risks", "develop risks", "produce risks", "risk generation",
-            "risk identification", "risk discovery", "risk analysis", "risk review"
-        ]
-        
-        # Check if this is a preference update request
-        preference_update_keywords = [
-            "update preferences", "change preferences", "modify preferences", "set preferences",
-            "update likelihood", "change likelihood", "update impact", "change impact",
-            "risk matrix", "matrix size", "3x3", "4x4", "5x5", "3*3", "4*4", "5*5", "current values",
-            "show preferences", "view preferences", "get preferences", "preference settings"
-        ]
-        
-        # Check if this is a risk register request
-        risk_register_keywords = [
-            "open risk register", "show risk register", "view risk register", "display risk register",
-            "show finalized risks", "view finalized risks", "display finalized risks", "open finalized risks",
-            "risk register", "finalized risks", "show my risks", "view my risks", "display my risks",
-            "my risk register", "my finalized risks", "access risk register", "open my risks"
-        ]
-        
-        # Check if this is a risk profile request
-        risk_profile_keywords = [
-            "show risk profile", "view risk profile", "display risk profile", "open risk profile",
-            "risk profile", "my risk profile", "risk categories", "risk scales", "likelihood scale", "impact scale",
-            "risk matrix", "risk assessment matrix", "show risk matrix", "view risk matrix",
-            "risk preferences", "risk settings", "risk configuration", "risk framework"
-        ]
-        
-        # Check if this is a matrix recommendation request
-        matrix_recommendation_keywords = [
-            "recommend", "suggest", "create", "generate", "set up", "configure",
-            "3x3", "3*3", "4x4", "4*4", "5x5", "5*5", "matrix size", "risk matrix"
-        ]
-        
-        user_input_lower = user_input.lower()
-        is_risk_generation_request = any(keyword in user_input_lower for keyword in risk_generation_keywords)
-        is_preference_update_request = any(keyword in user_input_lower for keyword in preference_update_keywords)
-        is_risk_register_request = any(keyword in user_input_lower for keyword in risk_register_keywords)
-        is_risk_profile_request = any(keyword in user_input_lower for keyword in risk_profile_keywords)
-        
-        # Check for matrix recommendation
-        is_matrix_recommendation_request = any(keyword in user_input_lower for keyword in matrix_recommendation_keywords)
-        
-        # Extract matrix size from user input
-        matrix_size = None
-        if "3x3" in user_input_lower or "3*3" in user_input_lower:
-            matrix_size = "3x3"
-        elif "4x4" in user_input_lower or "4*4" in user_input_lower:
-            matrix_size = "4x4"
-        elif "5x5" in user_input_lower or "5*5" in user_input_lower:
-            matrix_size = "5x5"
-        
+        # LLM-based intent router for Risk Node
+        system_prompt = """
+You are the **Risk Node Intent Router**. Your job is to infer the user's **single best intent** (semantic intent, not keywords), extract normalized slots, and return **only** one JSON object in the exact format below—no extra text, no markdown, no code fences.
 
+### Output (strict)
+{
+  "intent": "<one_of_intents>",
+  "slots": { },
+  "rationale": "<brief one-sentence why>",
+  "confidence": <0.0-1.0>,
+  "clarifying_question": "<only include if intent='clarify'>"
+}
+
+### Allowed intents
+- generate_risks — create a set of risks given org/location/domain/total.
+- update_preferences — update persistent preferences (risk profiles, scales, matrix size).
+- view_risk_profile — open the risk profile dashboard/table view.
+- view_risk_register — open the risk register/finalized risks view.
+- preview_matrix — show likelihood-impact matrix recommendation/preview.
+- clarify — ask one focused question when essential info is missing or multiple intents are equally plausible.
+
+### Slot schema & normalization (populate only what’s present)
+- organization_name: string (e.g., "Acme Bank", "fintech startup")
+- location: string (prefer "City, Country" if given; else region/country)
+- domain: canonical string from { "cybersecurity","operational","financial","strategic","compliance","privacy","supply_chain","manufacturing","cloud","data","physical_security","it","enterprise" }. Map synonyms (e.g., "infosec"→"cybersecurity", "ops"→"operational").
+- total: integer (e.g., 25)
+- matrix_size: string "NxN" (e.g., "4x4","5x5")
+- risk_profiles: array of strings (e.g., ["strategic","operational"])
+- scales: object { "likelihood": "1-5" | "1-7", "impact": "1-5" | "1-7" }
+- effective_date: ISO 8601 date if specified (YYYY-MM-DD)
+- filters: object for view intents (e.g., {"region":"APAC","status":"finalized"})
+
+Normalize numbers (e.g., "twenty"→20), dates (to ISO 8601), casing (title case for orgs/locations), and synonyms.
+
+### Decision rules (precision first)
+1. **Prefer action over Q&A** when the user asks to *do* something (generate/show/open/recommend/change).
+2. If **essential slots** for an action are missing or **multiple intents** are equally likely → use `clarify` and ask **one** targeted, closed question that names the missing piece(s).
+3. If the user asks to **change defaults/settings** (scales, matrix, profiles, default counts) → `update_preferences`.
+4. “Open/Show/View” the register → `view_risk_register`; the profile table → `view_risk_profile`.
+5. “Recommend/Suggest/Pick a XxY matrix/heatmap” → `preview_matrix` (extract `matrix_size` if present).
+6. If the user both *requests a view* and *requests generation*, **generation takes precedence** (`generate_risks`) unless the user explicitly says “don’t generate”.
+7. Greetings, small talk, or broad vagueness (“make it safer”, “help me start”) → `clarify`.
+8. Out-of-scope or generic knowledge questions (no actionable mapping) → `clarify` asking which action they want.
+
+### Confidence rubric
+- 0.85–1.00: Clear imperative with required slots or unambiguous view/update.
+- 0.60–0.84: Some inference required; minor slot gaps but intent is clear.
+- <0.60: Ambiguous or missing essential info → prefer `clarify`.
+
+### Synonym & phrase mapping (non-exhaustive)
+- risk register: {"register","log","finalized risks","approved list"} → view_risk_register
+- risk profile: {"profile table","risk appetite profile","baseline profile"} → view_risk_profile (if viewing); update_preferences (if changing)
+- matrix: {"heatmap","risk heat map","grid","4 by 4"} → preview_matrix (matrix_size="4x4")
+- cybersecurity: {"infosec","security","cyber"} → "cybersecurity"
+- operational: {"ops","operations"} → "operational"
+
+### Few-shot examples
+
+User: Generate an initial set of 25 cyber risks for a fintech in London.
+{
+  "intent": "generate_risks",
+  "slots": {"organization_name": "fintech", "location": "London", "domain": "cybersecurity", "total": 25},
+  "rationale": "Explicit creation request with domain, location, and count.",
+  "confidence": 0.92
+}
+
+User: Show me the current risk profile table.
+{
+  "intent": "view_risk_profile",
+  "slots": {},
+  "rationale": "Direct request to view the profile table.",
+  "confidence": 0.96
+}
+
+User: Open my risk register for APAC.
+{
+  "intent": "view_risk_register",
+  "slots": {"filters": {"region": "APAC"}},
+  "rationale": "Wants the finalized risks view, filtered by region.",
+  "confidence": 0.93
+}
+
+User: Recommend a 4x4 matrix for my startup.
+{
+  "intent": "preview_matrix",
+  "slots": {"matrix_size": "4x4"},
+  "rationale": "Asks for a matrix recommendation with size.",
+  "confidence": 0.90
+}
+
+User: Switch our likelihood scale to 1-7 and keep impact at 1-5.
+{
+  "intent": "update_preferences",
+  "slots": {"scales": {"likelihood": "1-7", "impact": "1-5"}},
+  "rationale": "Explicit preference change to scales.",
+  "confidence": 0.95
+}
+
+User: Set default matrix to 5x5 and use profiles strategic + operational.
+{
+  "intent": "update_preferences",
+  "slots": {"matrix_size": "5x5", "risk_profiles": ["strategic","operational"]},
+  "rationale": "Updates persistent defaults for matrix and profiles.",
+  "confidence": 0.94
+}
+
+User: Spin up 15 risks for our hospital in Bangalore focusing on privacy.
+{
+  "intent": "generate_risks",
+  "slots": {"organization_name": "hospital", "location": "Bangalore", "domain": "privacy", "total": 15},
+  "rationale": "Creation request with org, location, domain, and count.",
+  "confidence": 0.90
+}
+
+User: Show the heat map.
+{
+  "intent": "preview_matrix",
+  "slots": {},
+  "rationale": "Heat map refers to the matrix preview; size not specified.",
+  "confidence": 0.75
+}
+
+User: Make it safer.
+{
+  "intent": "clarify",
+  "slots": {},
+  "rationale": "Underspecified; could be generate, preview, or update.",
+  "confidence": 0.35,
+  "clarifying_question": "Do you want me to generate new risks, open the profile/register view, or adjust preferences like matrix size or scales?"
+}
+
+User: Generate risks for my SaaS; use our standard scales.
+{
+  "intent": "generate_risks",
+  "slots": {"organization_name": "SaaS"},
+  "rationale": "Actionable creation request; scales reference existing prefs.",
+  "confidence": 0.78
+}
+
+### Validation
+- Output must be a single JSON object with exactly the specified keys.
+- Include "clarifying_question" **only** when intent = "clarify".
+- Do not include code fences, extra commentary, or additional fields.
+
+"""
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_input)
+        ]
+
+        response = llm.invoke(messages)
+
+        content = response.content.strip()
+        if content.startswith("```") and content.endswith("```"):
+            # Strip code fences if model returned fenced JSON
+            content = content.strip('`')
         
-        if is_risk_generation_request:
-            # Set flag to trigger risk generation
+        # Attempt to extract JSON if wrapped
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            # Try to find first JSON object in the response
+            start = content.find('{')
+            end = content.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                parsed = json.loads(content[start:end+1])
+            else:
+                parsed = {"intent": "clarify", "slots": {}, "rationale": "Unparseable response", "confidence": 0.0, "clarifying_question": "Could you rephrase your request?"}
+
+        intent = (parsed.get("intent") or "").lower()
+        slots = parsed.get("slots") or {}
+
+        # Map intents to flags/nodes
+        if intent == "generate_risks":
             return {
                 "output": "",
                 "conversation_history": conversation_history,
@@ -113,9 +228,7 @@ def risk_node(state: LLMState):
                 "risk_profile_requested": False,
                 "matrix_recommendation_requested": False
             }
-        
-        if is_preference_update_request:
-            # Set flag to trigger preference update
+        if intent == "update_preferences":
             return {
                 "output": "",
                 "conversation_history": conversation_history,
@@ -127,9 +240,7 @@ def risk_node(state: LLMState):
                 "risk_profile_requested": False,
                 "matrix_recommendation_requested": False
             }
-        
-        if is_risk_register_request:
-            # Set flag to trigger risk register access
+        if intent == "view_risk_register":
             return {
                 "output": "",
                 "conversation_history": conversation_history,
@@ -141,9 +252,7 @@ def risk_node(state: LLMState):
                 "risk_profile_requested": False,
                 "matrix_recommendation_requested": False
             }
-            
-        if is_risk_profile_request:
-            # Set flag to trigger risk profile access
+        if intent == "view_risk_profile":
             return {
                 "output": "",
                 "conversation_history": conversation_history,
@@ -155,9 +264,8 @@ def risk_node(state: LLMState):
                 "risk_profile_requested": True,
                 "matrix_recommendation_requested": False
             }
-        
-        if is_matrix_recommendation_request and matrix_size:
-            # Set flag to trigger matrix recommendation
+        if intent == "preview_matrix":
+            matrix_size = slots.get("matrix_size") or slots.get("size")
             return {
                 "output": "",
                 "conversation_history": conversation_history,
@@ -168,103 +276,25 @@ def risk_node(state: LLMState):
                 "risk_register_requested": False,
                 "risk_profile_requested": False,
                 "matrix_recommendation_requested": True,
-                "matrix_size": matrix_size
+                "matrix_size": matrix_size or "5x5"
             }
-        
-        # Create a comprehensive system prompt for Risk Management Agent
-        system_prompt = """You are an expert Risk Management Agent specializing in organizational risk assessment, compliance management, and risk mitigation strategies. You should:
 
-        1. **Risk Assessment Expertise**: Help organizations identify, analyze, and evaluate various types of risks including:
-           - Competition
-           - External
-           - Financial
-           - Innovation
-           - Internal
-           - Legal and Compliance
-           - Operational
-           - Project Management
-           - Reputational
-           - Safety
-           - Strategic
-           - Technology
+        # Clarify or fallback: respond with clarifying question if provided
+        clarifying_question = parsed.get("clarifying_question") or "Could you clarify what you want to do regarding risks?"
 
-        2. **Compliance Knowledge**: Provide guidance on:
-           - Industry-specific regulations (SOX, GDPR, HIPAA, PCI-DSS, etc.)
-           - Compliance frameworks and standards
-           - Risk-based compliance approaches
-           - Audit preparation and best practices
-
-        3. **Risk Management Framework**: Assist with:
-           - Risk identification and categorization
-           - Risk scoring and prioritization
-           - Risk mitigation strategies
-           - Risk monitoring and reporting
-           - Business continuity planning
-
-        4. **Communication Style**:
-           - Be professional yet approachable
-           - Use clear, actionable language
-           - Provide specific examples when relevant
-           - Ask clarifying questions to better understand the organization's context
-           - Offer practical recommendations
-
-        5. **Context Awareness**: 
-           - Remember previous risk assessments and discussions
-           - Build on previous recommendations
-           - Maintain consistency in risk evaluation approaches
-
-        6. **Risk Generation**: When users ask for risk generation or recommendations:
-           - Suggest using the risk generation feature
-           - Explain that you can generate organization-specific risks
-           - Ask for organization details if not already provided
-
-        Current conversation context: {conversation_history}
-        Risk Assessment Context: {risk_context}
-        User Organization Data: {user_data}
-        """
-        
-        # Format conversation history for context
-        formatted_history = ""
-        if conversation_history:
-            formatted_history = "\n".join([
-                f"User: {msg['user']}\nAssistant: {msg['assistant']}" 
-                for msg in conversation_history[-8:]  # Keep last 8 exchanges for context
-            ])
-        
-        # Format risk context
-        formatted_risk_context = ""
-        if risk_context:
-            formatted_risk_context = f"Organization: {risk_context.get('organization', 'Not specified')}\n"
-            formatted_risk_context += f"Industry: {risk_context.get('industry', 'Not specified')}\n"
-            formatted_risk_context += f"Risk Areas Identified: {', '.join(risk_context.get('risk_areas', []))}\n"
-            formatted_risk_context += f"Compliance Requirements: {', '.join(risk_context.get('compliance_requirements', []))}"
-        
-        # Format user data
-        formatted_user_data = ""
-        if user_data:
-            formatted_user_data = f"Organization: {user_data.get('organization_name', 'Not specified')}\n"
-            formatted_user_data += f"Location: {user_data.get('location', 'Not specified')}\n"
-            formatted_user_data += f"Domain: {user_data.get('domain', 'Not specified')}"
-        
-        # Create the full prompt
-        full_prompt = f"{system_prompt.format(conversation_history=formatted_history, risk_context=formatted_risk_context, user_data=formatted_user_data)}\n\nUser: {user_input}\nAssistant:"
-        
-        response = llm.invoke(full_prompt)
-        
-        # Update conversation history
         updated_history = conversation_history + [
-            {"user": user_input, "assistant": response.content}
+            {"user": user_input, "assistant": clarifying_question}
         ]
-        
-        # Update risk context based on the conversation
-        updated_risk_context = update_risk_context(risk_context, user_input, response.content)
-        
         return {
-            "output": response.content,
+            "output": clarifying_question,
             "conversation_history": updated_history,
-            "risk_context": updated_risk_context,
+            "risk_context": risk_context,
+            "user_data": user_data,
             "risk_generation_requested": False,
-            "preference_update_requested": False
+            "preference_update_requested": False,
+            "risk_register_requested": False,
+            "risk_profile_requested": False,
+            "matrix_recommendation_requested": False
         }
     except Exception as e:
         return {

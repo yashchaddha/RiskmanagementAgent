@@ -53,7 +53,7 @@ export const RiskTable: React.FC<RiskTableProps> = ({ risks, onRiskSelectionChan
         const token = localStorage.getItem("token");
         if (!token) return;
 
-        const response = await fetch("/api/user/preferences", {
+        const response = await fetch("http://localhost:8000/user/preferences", {
           headers: {
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
@@ -125,7 +125,7 @@ export const RiskTable: React.FC<RiskTableProps> = ({ risks, onRiskSelectionChan
 
       const backendField = fieldMapping[field] || field;
 
-      const response = await fetch(`/api/risks/${riskIndex}/update`, {
+              const response = await fetch(`http://localhost:8000/risks/${riskIndex}/update`, {
         method: "PUT",
         headers: {
           Authorization: `Bearer ${token}`,

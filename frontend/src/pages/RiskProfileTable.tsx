@@ -44,7 +44,7 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
         return;
       }
 
-      const response = await fetch('/api/user/risk-profiles/table', {
+              const response = await fetch('http://localhost:8000/user/risk-profiles/table', {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
@@ -118,7 +118,7 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
       
       // Save all profiles to ensure synchronized changes are persisted
       const savePromises = profiles.map(async (profileToSave) => {
-        const response = await fetch('/api/user/risk-profiles/update', {
+        const response = await fetch('http://localhost:8000/user/risk-profiles/update', {
           method: 'PUT',
           headers: {
             'Authorization': `Bearer ${token}`,

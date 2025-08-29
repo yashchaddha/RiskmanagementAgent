@@ -603,6 +603,8 @@ async def apply_matrix_configuration(request: MatrixConfigurationRequest, curren
         matrix_size = request.matrix_size
         profiles = request.profiles
         
+        print(f"DEBUG: Received matrix configuration request - matrix_size: {matrix_size}, profiles count: {len(profiles) if profiles else 0}")
+        
         # Validate matrix size
         if matrix_size not in ["3x3", "4x4", "5x5"]:
             return {

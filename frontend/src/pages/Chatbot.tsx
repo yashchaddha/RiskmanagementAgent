@@ -429,7 +429,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const createMatrixRecommendation = async (matrixSize: string) => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("/api/user/risk-profiles/matrix-recommendation", {
+      const response = await fetch("http://localhost:8000/user/risk-profiles/matrix-recommendation", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -444,6 +444,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
         const result = await response.json();
         if (result.success) {
           // Set the preview data and show the modal
+          console.log("Matrix recommendation data received:", result.data);
           setMatrixPreviewData(result.data);
           setShowMatrixPreviewModal(true);
           return `🎯 **${matrixSize} Matrix Recommendation Generated!**
@@ -473,7 +474,7 @@ Your existing risk profiles are safe and will only be replaced when you explicit
   const applyMatrixRecommendation = async (matrixSize: string) => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("/api/user/risk-profiles/apply-matrix-recommendation", {
+      const response = await fetch("http://localhost:8000/user/risk-profiles/apply-matrix-recommendation", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -513,8 +514,10 @@ You can continue using the risk profile dashboard to further customize the scale
     try {
       const token = localStorage.getItem("token");
 
+      console.log("Applying matrix configuration:", { matrixSize, updatedProfiles });
+
       // Use the new endpoint that accepts custom profiles
-      const response = await fetch("/api/user/risk-profiles/apply-matrix-configuration", {
+      const response = await fetch("http://localhost:8000/user/risk-profiles/apply-matrix-configuration", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
