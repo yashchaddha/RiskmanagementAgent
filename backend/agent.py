@@ -309,6 +309,7 @@ User: Generate risks for my SaaS; use our standard scales.
 def risk_generation_node(state: LLMState):
     """Generate organization-specific risks based on user data"""
     print("Risk Generation Node Activated")
+    print(f"Input received: {state.get('input', 'No input')}")
     try:
         llm = get_llm()
         
@@ -317,6 +318,8 @@ def risk_generation_node(state: LLMState):
         location = user_data.get("location", "the current location")
         domain = user_data.get("domain", "the industry domain")
         risks_applicable = user_data.get("risks_applicable", [])
+        
+        print(f"User data: organization={organization_name}, location={location}, domain={domain}")
         
         # Get user's risk profiles to use their specific scales
         from database import RiskProfileDatabaseService
@@ -335,47 +338,90 @@ def risk_generation_node(state: LLMState):
                 default_likelihood = [level["title"] for level in first_profile.get("likelihoodScale", [])]
                 default_impact = [level["title"] for level in first_profile.get("impactScale", [])]
         
+        print(f"Using likelihood scale: {default_likelihood}")
+        print(f"Using impact scale: {default_impact}")
+        
         # Create a comprehensive prompt for risk generation
-        risk_generation_prompt = f"""You are an expert Risk Management Specialist. Generate 10 comprehensive risks specifically applicable to {organization_name} located in {location} operating in the {domain} domain.
+        risk_generation_prompt = f"""
+You are an expert Risk Management Specialist.
 
-IMPORTANT: The user has specified their risk preferences:
-- Preferred Risk Likelihood Levels: {default_likelihood}
-- Preferred Risk Impact Levels: {default_impact}
+You will receive:
+1) The user's message (their request).
+2) Current user's organization:
+   - organization_name: "{organization_name}"
+   - location: "{location}"
+   - domain: "{domain}"
+3) User-preferred scales:
+   - likelihood levels (exact strings): {default_likelihood}
+   - impact levels (exact strings): {default_impact}
 
-When generating risks, use these preference arrays to determine the likelihood and impact levels. The system will automatically select appropriate values from these arrays based on the specific risk context and the organization's characteristics.
+YOUR TASK
+- From the user's message, infer:
+  • risk_count (how many risks to generate)  
+  • target organization name (if they specify a different org than the profile)  
+  • target location (if specified)  
+  • target domain/industry (if specified)  
+  • any category focus (keywords like “privacy”, “security”, “operational”, etc.)
+- If any of the above are NOT provided in the user's message, FALL BACK to the profile values.
+- Determine risk_count from USER_MESSAGE if stated; otherwise default to 10. Cap at 50.
+- Always generate specific, actionable, non-duplicative risks tailored to the final resolved context (org, location, domain, focus).
 
-Return the risks in the following JSON format ONLY. Do not include any other text or formatting:
+CATEGORIES
+Use only the following category values for the "category" field:
+["Competition","External","Financial","Innovation","Internal","Legal and Compliance","Operational","Project Management","Reputational","Safety","Strategic","Technology"]
 
+If the user mentions topical focuses or synonyms, map them sensibly to the above categories. For example:
+- privacy, data privacy, GDPR, HIPAA → Legal and Compliance
+- security, cybersecurity, info-sec → Technology
+- outage, continuity, downtime, incident response → Operational
+- brand, reputation, PR → Reputational
+- project, schedule, scope, delivery → Project Management
+- budget, cash flow, fraud, credit → Financial
+- innovation, R&D, emerging tech → Innovation
+- people, talent, attrition, HR → Internal
+- health, workplace safety → Safety
+- competitor, market share → Competition
+- geopolitics, climate, regulation changes → External
+- strategy, mergers, market positioning → Strategic
+
+OUTPUT FORMAT — STRICT
+- Return ONLY a single JSON object with this exact schema and nothing else (no prose, no markdown, no code fences):
 {{
   "risks": [
     {{
-      "description": "Clear, detailed description of the risk",
-      "category": "One of: Competition, External, Financial, Innovation, Internal, Legal and Compliance, Operational, Project Management, Reputational, Safety, Strategic, Technology",
-      "likelihood": "High/Medium/Low",
-      "impact": "High/Medium/Low",
-      "treatment_strategy": "Specific recommendations to mitigate or manage the risk"
-    }},
-    {{
-      "description": "Clear, detailed description of the risk",
-      "category": "One of: Competition, External, Financial, Innovation, Internal, Legal and Compliance, Operational, Project Management, Reputational, Safety, Strategic, Technology",
-      "likelihood": "High/Medium/Low",
-      "impact": "High/Medium/Low",
-      "treatment_strategy": "Specific recommendations to mitigate or manage the risk"
+      "description": "Clear, specific risk description tailored to the organization",
+      "category": "One of the allowed categories above",
+      "likelihood": "One of the allowed likelihood levels",
+      "impact": "One of the allowed impact levels",
+      "treatment_strategy": "Concrete, actionable mitigation or management steps"
     }}
   ]
 }}
+- The "risks" array length MUST equal the inferred risk_count (default 10 if not stated).
+- "likelihood" MUST be exactly one of the provided likelihood levels (string match).
+- "impact" MUST be exactly one of the provided impact levels (string match).
+- Do not add extra keys at any level. Do not include comments, explanations, or trailing commas.
 
-Generate 10 risks in the JSON array above. Consider the organization's:
-- Industry domain and specific challenges
-- Geographic location and regulatory environment
-- Size and operational complexity
-- Current market conditions and trends
-- User's risk preferences (Likelihood Levels: {default_likelihood}, Impact Levels: {default_impact})
+QUALITY BAR
+- Make every risk specific to the final resolved organization, location, and domain.
+- Reflect location-specific regulations or standards when relevant.
+- Vary categories and angles to avoid overlap unless the user explicitly narrows the focus.
+- Ensure the JSON is valid and parseable.
 
-Make the risks specific and actionable for {organization_name}. Ensure the JSON is valid and properly formatted."""
+INTERPRETATION EXAMPLES (do not echo in output)
+- “Spin up 15 risks for our hospital in Bangalore focusing on privacy.” → 15 privacy-heavy, healthcare-specific risks, location=Bangalore, category bias=Legal and Compliance; use scales provided above.
+- “Give 8 operational risks for ACME Bank in Mumbai” → 8 risks, category=Operational, org=ACME Bank, location=Mumbai, domain=Banking if implied; use scales.
+- “List risks for my org” → default to profile org/location/domain and 10 risks.
+"""
 
-        response = llm.invoke(risk_generation_prompt)
-        
+        print("Sending request to LLM...")
+        messages = [
+            SystemMessage(content=risk_generation_prompt),
+            HumanMessage(content=state["input"])
+        ]
+
+        response = llm.invoke(messages)
+        print(f"LLM Response received: {response.content[:100]}...")  # First 100 chars only
         # Update conversation history
         conversation_history = state.get("conversation_history", [])
         updated_history = conversation_history + [
@@ -389,6 +435,7 @@ Make the risks specific and actionable for {organization_name}. Ensure the JSON 
         risk_context["industry"] = domain
         risk_context["location"] = location
         
+        print("Risk generation completed successfully")
         return {
             "output": response.content,
             "conversation_history": updated_history,
@@ -396,6 +443,9 @@ Make the risks specific and actionable for {organization_name}. Ensure the JSON 
             "risk_generation_requested": False  # Reset the flag
         }
     except Exception as e:
+        print(f"Error in risk_generation_node: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {
             "output": f"I apologize, but I encountered an error while generating risks for your organization: {str(e)}. Please try again.",
             "conversation_history": state.get("conversation_history", []),
