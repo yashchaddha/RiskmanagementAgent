@@ -6,13 +6,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from typing_extensions import TypedDict
 from dependencies import get_llm
 import json
-
-# Try to import the ISO knowledge, fallback to empty dict if import fails
-try:
-    from knowledge_base import ISO_27001_KNOWLEDGE
-except ImportError:
-    print("Warning: Could not import ISO_27001_KNOWLEDGE, using empty dict instead")
-    ISO_27001_KNOWLEDGE = {}
+from knowledge_base import ISO_27001_KNOWLEDGE
 
 # Load environment variables from .env
 load_dotenv()
@@ -748,52 +742,83 @@ def matrix_recommendation_node(state: LLMState):
                 lv.setdefault("description", "Contextual description")
             return levels
 
-        # ---------- Prompt (concise but strict) ----------
+        # Enhanced prompt with better query understanding and category-specific scales
         prompt = f"""
-You are a Risk Management Specialist.
+You are a Risk Management Specialist creating customized risk matrices.
 
 GOAL
-Return a tailored risk matrix (size 3x3, 4x4, or 5x5 only) as VALID JSON (no prose).
+Parse the user's request and return a tailored risk matrix as VALID JSON (no prose, no markdown).
 
-INPUTS
-- USER_MESSAGE: free text from user
+CONTEXT ANALYSIS
+- USER_MESSAGE: "{user_input}"
+- CONVERSATION_HISTORY: Available for context about "my organization"
 - PROFILE_DEFAULTS: organization="{org}", location="{loc}", domain="{dom}"
-- DEFAULT_MATRIX_SIZE: "5x5"
 
-RULES
-1) JSON ONLY. No markdown. No explanations. No questions.
-2) Matrix size resolution (in order):
-   a) If USER_MESSAGE explicitly asks 3x3/4x4/5x5 -> use exactly that.
-   b) If another size is requested -> choose nearest among 3x3/4x4/5x5.
-   c) If no size -> use DEFAULT_MATRIX_SIZE.
-3) USER_MESSAGE values for organization/location/domain override PROFILE_DEFAULTS; otherwise use defaults.
-4) Likelihood list length must equal rows; Impact list length must equal columns.
-5) Provide 6–10 risk_categories (ideally 8), each with riskType + definition.
-6) Keep titles/descriptions concise and context-aware. No extra keys.
+QUERY PARSING RULES
+1) **Organization Resolution**:
+   - If USER_MESSAGE mentions specific org (e.g., "hospital", "bank", "TechCorp") -> use that
+   - If USER_MESSAGE says "my organization/company" -> use PROFILE_DEFAULTS organization
+   - If no org mentioned -> use PROFILE_DEFAULTS organization
 
-OUTPUT SCHEMA (return exactly this shape):
+2) **Location Resolution**:
+   - If USER_MESSAGE mentions location (e.g., "India", "London", "Mumbai") -> use that
+   - If says "my" -> use PROFILE_DEFAULTS location
+   - If no location -> use PROFILE_DEFAULTS location
+
+3) **Domain/Industry Resolution**:
+   - If USER_MESSAGE mentions industry (e.g., "hospital" -> healthcare, "bank" -> financial) -> map to domain
+   - If says "my" -> use PROFILE_DEFAULTS domain
+   - Common mappings: hospital->healthcare, bank->financial, startup->technology, manufacturing->manufacturing
+
+4) **Matrix Size Resolution**:
+   - Extract explicit size: "3x3", "4x4", "5x5", "3 by 3", etc.
+   - If other size mentioned -> choose nearest (3x3, 4x4, or 5x5)
+   - If no size -> default to "5x5"
+
+CATEGORY-SPECIFIC SCALES
+Generate likelihood and impact descriptions tailored to the resolved domain:
+- **Healthcare**: Focus on patient safety, regulatory compliance, operational continuity
+- **Financial**: Focus on monetary loss, regulatory penalties, market impact
+- **Technology**: Focus on system availability, data security, innovation disruption
+- **Manufacturing**: Focus on production impact, safety incidents, supply chain
+- **General**: Use standard business impact terminology
+
+OUTPUT REQUIREMENTS
+- JSON ONLY (no markdown, no explanations)
+- Likelihood array length = matrix rows, Impact array length = matrix columns
+- 6-10 risk categories with domain-appropriate definitions
+- Descriptions should reflect the specific industry context
+
+EXAMPLE MAPPINGS
+- "recommend 3x3 matrix for hospital in India" -> org="hospital", location="India", domain="healthcare", size="3x3"
+- "4x4 matrix for my organization" -> org=PROFILE_DEFAULTS, location=PROFILE_DEFAULTS, domain=PROFILE_DEFAULTS, size="4x4"
+- "matrix for TechCorp startup in London" -> org="TechCorp", location="London", domain="technology", size="5x5" (default)
+
+OUTPUT SCHEMA:
 {{
-  "context": {{
-    "organization_name": "...",
-    "location": "...",
-    "domain": "...",
-    "matrix_size": "3x3|4x4|5x5"
+  "matrix_data": {{
+    "context": {{
+      "organization_name": "...",
+      "location": "...",
+      "domain": "...",
+      "matrix_size": "3x3|4x4|5x5"
+    }},
+    "matrix_scales": {{
+      "likelihood": [{{"level": 1, "title": "...", "description": "domain-specific description"}}],
+      "impact": [{{"level": 1, "title": "...", "description": "domain-specific description"}}]
+    }},
+    "risk_categories": [
+      {{"riskType": "...", "definition": "domain-appropriate definition"}}
+    ]
   }},
-  "matrix_scales": {{
-    "likelihood": [{{"level": 1, "title": "...", "description": "..."}} /* R items */],
-    "impact":     [{{"level": 1, "title": "...", "description": "..."}} /* C items */]
-  }},
-  "risk_categories": [
-    {{"riskType": "...", "definition": "..."}}
-    /* 6–10 items */
-  ]
+  "response_text": "A comprehensive, engaging response explaining the matrix recommendation. Include emojis, formatting, and context-appropriate language. Explain what was created, highlight key features, and provide next steps. Be conversational and helpful."
 }}
 """.strip()
 
         # ---------- LLM call ----------
         content = make_llm_call_with_history(prompt, user_input, conversation_history).strip()
 
-        # ---------- Extract & validate JSON ----------
+        # ---------- Extract & validate JSON with LLM-generated response ----------
         response_text = ""
         try:
             # Best-effort JSON extraction
@@ -801,10 +826,19 @@ OUTPUT SCHEMA (return exactly this shape):
             end = content.rfind("}") + 1
             if start == -1 or end <= start:
                 raise ValueError("No JSON found in LLM response.")
-            data = json.loads(content[start:end])
+            parsed_response = json.loads(content[start:end])
+            
+            # Extract matrix data and response text from LLM response
+            matrix_data = parsed_response.get("matrix_data", {})
+            response_text = parsed_response.get("response_text", "Matrix recommendation created successfully.")
+            
+            # If old format (direct matrix data), handle backwards compatibility
+            if not matrix_data and parsed_response.get("context"):
+                matrix_data = parsed_response
+                response_text = "Matrix recommendation created successfully."
 
             # Resolve context with fallbacks
-            ctx = data.get("context", {}) if isinstance(data, dict) else {}
+            ctx = matrix_data.get("context", {}) if isinstance(matrix_data, dict) else {}
             resolved_org  = ctx.get("organization_name") or org
             resolved_loc  = ctx.get("location") or loc
             resolved_dom  = ctx.get("domain") or dom
@@ -815,65 +849,26 @@ OUTPUT SCHEMA (return exactly this shape):
             R, C = _rc(resolved_size)
 
             # Normalize scales length & levels
-            scales = data.get("matrix_scales") or {}
+            scales = matrix_data.get("matrix_scales") or {}
             like = _ensure_levels(scales.get("likelihood"), R, ["Rare","Unlikely","Possible","Likely","Almost Certain"])
             imp  = _ensure_levels(scales.get("impact"),     C, ["Minor","Moderate","Major","Severe","Critical"])
 
-            data["context"] = {
+            matrix_data["context"] = {
                 "organization_name": resolved_org,
                 "location": resolved_loc,
                 "domain": resolved_dom,
                 "matrix_size": resolved_size,
             }
-            data["matrix_scales"] = {"likelihood": like, "impact": imp}
-            data["risk_categories"] = (data.get("risk_categories") or [])[:10]  # cap to 10
+            matrix_data["matrix_scales"] = {"likelihood": like, "impact": imp}
+            matrix_data["risk_categories"] = (matrix_data.get("risk_categories") or [])[:10]  # cap to 10
 
             # Persist in risk_context
-            risk_context["generated_matrix"] = data
+            risk_context["generated_matrix"] = matrix_data
             risk_context["matrix_size"] = resolved_size
             risk_context["organization"] = resolved_org
             risk_context["location"] = resolved_loc
             risk_context["industry"] = resolved_dom
-
-            # Build SAME final response text as before
-            cat_count = len(data["risk_categories"])
-            response_text = f"""🎯 **{resolved_size} Risk Matrix Recommendation for {resolved_org}**
-
-I've created a comprehensive {resolved_size} risk assessment framework specifically tailored for {resolved_org} in {resolved_loc}!
-
-**Customized Matrix Configuration:**
-• **Matrix Size**: {resolved_size} ({R} likelihood × {C} impact levels)
-• **Industry Focus**: {resolved_dom} sector
-• **Location Context**: {resolved_loc}
-• **Risk Categories**: {cat_count} specialized categories with context-specific definitions
-
-**Likelihood Scale:**"""
-            for lv in like:
-                response_text += f"\n{lv.get('level')}. **{lv.get('title','')}**: {lv.get('description','')}"
-
-            response_text += "\n\n**Impact Scale:**"
-            for lv in imp:
-                response_text += f"\n{lv.get('level')}. **{lv.get('title','')}**: {lv.get('description','')}"
-
-            response_text += "\n\n**Customized Risk Categories:**"
-            for i, cat in enumerate(data["risk_categories"], 1):
-                response_text += f"\n{i}. **{cat.get('riskType','')}**: {cat.get('definition','')}"
-
-            response_text += f"""
-
-**Key Features:**
-✅ Industry-specific terminology and scales
-✅ Location-appropriate regulatory considerations
-✅ Context-aware risk definitions
-✅ Scalable {resolved_size} assessment framework
-
-**Next Steps:**
-The risk profile dashboard will open with these customized scales. You can:
-• Review and further customize each category
-• Adjust scale definitions to match your specific needs
-• Apply this framework to start generating risks
-
-This tailored approach ensures your risk assessments are relevant to {resolved_org}'s unique context in the {resolved_dom} industry."""
+            
             matrix_size = resolved_size
 
         except Exception as e:
