@@ -3,7 +3,13 @@ from dotenv import load_dotenv
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.tools import tool
+from langgraph.prebuilt import create_react_agent
+from langchain_openai import OpenAIEmbeddings
+from pymilvus import MilvusClient
+from rag_tools import semantic_risk_search
 from typing_extensions import TypedDict
+from typing import List, Dict, Any
 from dependencies import get_llm
 import json
 from knowledge_base import ISO_27001_KNOWLEDGE
@@ -35,6 +41,73 @@ def make_llm_call_with_history(system_prompt: str, user_input: str, conversation
     # Make the call
     response = llm.invoke(messages)
     return response.content
+
+@tool("semantic_risk_search")
+def semantic_risk_search(query: str, user_id: str, top_k: int = 5) -> dict:
+    """
+    Semantically search the user's finalized risks stored in Zilliz/Milvus.
+    Returns a JSON payload of the top matches (with scores) filtered by user_id.
+
+    Args:
+        query: Free-text user query about risks.
+        user_id: Tenant scoping (strictly filter to this user).
+        top_k: Number of results to return.
+    """
+    try:
+        emb = OpenAIEmbeddings(model="text-embedding-3-small")
+        query_vec: List[float] = emb.embed_query(query)
+        client = MilvusClient(
+            uri=os.getenv("ZILLIZ_URI"),
+            token=os.getenv("ZILLIZ_TOKEN"),
+            secure=True
+        )
+        OUTPUT_FIELDS = [
+            "risk_id", "user_id", "organization_name", "location", "domain", 
+            "category", "department", "risk_owner", "risk_text"
+        ]
+        expr = f"user_id == '{user_id}'"
+        results = client.search(
+            collection_name="finalized_risks_index",
+            data=[query_vec],
+            anns_field="embedding",
+            limit=top_k,
+            output_fields=OUTPUT_FIELDS,
+            filter=expr,
+        )
+
+        hits: List[Dict[str, Any]] = []
+        if results and len(results) > 0:
+            for hit in results[0]:
+                entity = hit.get("entity", {}) if isinstance(hit, dict) else getattr(hit, "entity", {})
+                score = hit.get("score", None) if isinstance(hit, dict) else getattr(hit, "score", None)
+                try:
+                    score = float(score) if score is not None else None
+                except Exception:
+                    pass
+
+                hits.append({
+                    "risk_id": entity.get("risk_id"),
+                    "score": score,
+                    "user_id": entity.get("user_id"),
+                    "organization_name": entity.get("organization_name"),
+                    "location": entity.get("location"),
+                    "domain": entity.get("domain"),
+                    "category": entity.get("category"),
+                    "department": entity.get("department"),
+                    "risk_owner": entity.get("risk_owner"),
+                    "risk_text": entity.get("risk_text"),
+                })
+
+        return {
+            "hits": hits,
+            "count": len(hits),
+            "query": query,
+            "user_id": user_id
+        }
+
+    except Exception as e:
+        return {"hits": [], "count": 0, "error": str(e), "query": query, "user_id": user_id}
+
 
 # 1. Define the state schema
 class LLMState(TypedDict):
@@ -79,7 +152,7 @@ You are the **Risk Node Intent Router**. Your job is to infer the user's **singl
 - generate_risks — create a set of risks given org/location/domain/total.
 - update_preferences — update persistent preferences (risk profiles, scales, matrix size).
 - view_risk_profile — open the risk profile dashboard/table view.
-- view_risk_register — open the risk register/finalized risks view.
+- view_risk_register — open the risk register/finalized risks view and handle search/filter queries.
 - preview_matrix — show likelihood-impact matrix recommendation/preview.
 - clarify — ask one focused question when essential info is missing or multiple intents are equally plausible.
 
@@ -142,6 +215,22 @@ User: Open my risk register for APAC.
   "slots": {"filters": {"region": "APAC"}},
   "rationale": "Wants the finalized risks view, filtered by region.",
   "confidence": 0.93
+}
+
+User: Find me risks with high impact.
+{
+  "intent": "view_risk_register",
+  "slots": {"filters": {"impact": "high"}},
+  "rationale": "Searching for specific risks by impact level.",
+  "confidence": 0.95
+}
+
+User: Show me all cybersecurity risks.
+{
+  "intent": "view_risk_register",
+  "slots": {"filters": {"category": "cybersecurity"}},
+  "rationale": "Filtering risks by category.",
+  "confidence": 0.92
 }
 
 User: Recommend a 4x4 matrix for my startup.
@@ -467,31 +556,76 @@ INTERPRETATION EXAMPLES (do not echo in output)
 
 # 4. Define the preference update node
 def risk_register_node(state: LLMState):
-    """Handle risk register access requests"""
+    """Open the risk register, and when the user asks to find/filter risks,
+    perform semantic search via a LangGraph tool call (OpenAI model)."""
     print("Risk Register Node Activated")
     try:
         user_input = state["input"]
-        conversation_history = state.get("conversation_history", [])
-        risk_context = state.get("risk_context", {})
-        user_data = state.get("user_data", {})
-        
-        system_prompt = """You are a Risk Management Agent. The user has requested to access their risk register or view their finalized risks.
+        conversation_history = state.get("conversation_history", []) or []
+        risk_context = state.get("risk_context", {}) or {}
+        user_data = state.get("user_data", {}) or {}
+        user_id = user_data.get("username", "")
+        model = get_llm()
 
-Provide a helpful response that:
-1. Acknowledges their request to access the risk register
-2. Explains that you'll open their risk register where they can view all their finalized risks
-3. Mentions that they can search, filter, and review their risk assessment data
-4. Keep the response concise and friendly"""
-        
-        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
-        
+        system_prompt = f"""
+You are the Risk Register assistant.
+
+- If the user is asking to **find/search/list/filter/sort** risks or anything that
+  requires looking up their previously **finalized risks**, you MUST call the tool
+  `semantic_risk_search` with:
+    - query: a concise reformulation of the user's ask
+    - user_id: "{user_id}"
+    - top_k: pick 5-10 based on query breadth (default 5)
+
+- After you get tool results, respond with:
+  1) a short, clear natural-language summary (what you found and why it matches)
+- If the user only says things like “open my risk register” (no search),
+  DO NOT call the tool. Just acknowledge that the register is open and instruct
+  how to ask search queries naturally (e.g., “find cyber risks about ransomware”).
+        """.strip()
+
+        messages = [SystemMessage(content=system_prompt)]
+        recent_history = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
+        for ex in recent_history:
+            if ex.get("user"):
+                messages.append(HumanMessage(content=ex["user"]))
+            if ex.get("assistant"):
+                messages.append(AIMessage(content=ex["assistant"]))
+
+        messages.append(HumanMessage(content=user_input))
+
+        agent = create_react_agent(
+            model=model,
+            tools=[semantic_risk_search],
+        )
+
+        result = agent.invoke({"messages": messages})
+
+        final_text = ""
+        try:
+            msgs = result.get("messages", [])
+            if msgs:
+                last = msgs[-1]
+                final_text = getattr(last, "content", "") or ""
+                if isinstance(final_text, list):
+                    final_text = " ".join(
+                        [getattr(p, "content", p) for p in final_text if p]
+                    )
+        except Exception:
+            pass
+
+        if not final_text:
+            # Fallback to a simple open-register message when nothing returned
+            final_text = (
+                "I’ve opened your risk register. You can ask me to search it, e.g., "
+                "“find cyber risks about ransomware” or “show data privacy risks with high impact.”"
+            )
+
         # Update conversation history
-        updated_history = conversation_history + [
-            {"user": user_input, "assistant": response_content}
-        ]
-        
+        updated_history = conversation_history + [{"user": user_input, "assistant": final_text}]
+
         return {
-            "output": response_content,
+            "output": final_text,
             "conversation_history": updated_history,
             "risk_context": risk_context,
             "user_data": user_data,
@@ -499,15 +633,19 @@ Provide a helpful response that:
             "preference_update_requested": False,
             "risk_register_requested": False
         }
-        
+
     except Exception as e:
-        error_response = f"I understand you want to access your risk register. I'll open it for you so you can view all your finalized risks."
-        
+        error_response = (
+            "I understand you want to access your risk register. I’ve opened it. "
+            "You can ask me to search it with natural language (e.g., “find high-impact third-party risks”)."
+        )
         return {
             "output": error_response,
-            "conversation_history": conversation_history + [{"user": user_input, "assistant": error_response}],
-            "risk_context": risk_context,
-            "user_data": user_data,
+            "conversation_history": (state.get("conversation_history", []) or []) + [
+                {"user": state.get("input", ""), "assistant": error_response}
+            ],
+            "risk_context": state.get("risk_context", {}),
+            "user_data": state.get("user_data", {}),
             "risk_generation_requested": False,
             "preference_update_requested": False,
             "risk_register_requested": False
@@ -973,6 +1111,7 @@ INTENT CLASSIFICATION RULES:
 
 3. RISK-RELATED QUERIES: Route to "risk_node" if the query is about:
    - Risk assessments and analysis
+   - Risk query, searching, filtering, and finding (e.g., "find risks with high impact", "show me cybersecurity risks", "list operational risks")
    - Risk registers and risk entries
    - Risk scoring or risk matrices
    - Risk treatment and mitigation plans
@@ -1022,6 +1161,26 @@ Intent: RISK-RELATED
 Route to: risk_node
 
 User: "How do I score and prioritize risks using a risk matrix?"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "Find me the risks related to data breach"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "Find me risks with high impact"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "Show me all cybersecurity risks"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "List operational risks with medium likelihood"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "Search for risks owned by John Smith"
 Intent: RISK-RELATED
 Route to: risk_node
 

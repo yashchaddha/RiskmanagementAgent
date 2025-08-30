@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import List, Optional, Any
 from pymongo import MongoClient
 from bson import ObjectId
+from vector_index import VectorIndexService
 from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisk, FinalizedRisks, FinalizedRisksResponse
 
 # Database result wrapper class
@@ -560,7 +561,35 @@ class RiskDatabaseService:
                         created_at=updated_doc["created_at"],
                         updated_at=updated_doc["updated_at"]
                     )
-                    
+
+                    # Update the vector index
+                    # Convert Risk objects to dictionaries for vector service
+                    risks_dicts = [
+                        {
+                            "_id": ObjectId(risk.id) if risk.id else ObjectId(),
+                            "description": risk.description,
+                            "category": risk.category,
+                            "likelihood": risk.likelihood,
+                            "impact": risk.impact,
+                            "treatment_strategy": risk.treatment_strategy,
+                            "asset_value": risk.asset_value,
+                            "department": risk.department,
+                            "risk_owner": risk.risk_owner,
+                            "security_impact": risk.security_impact,
+                            "target_date": risk.target_date,
+                            "risk_progress": risk.risk_progress,
+                            "residual_exposure": risk.residual_exposure
+                        }
+                        for risk in finalized_risks
+                    ]
+                    VectorIndexService.upsert_finalized_risks(
+                        user_id=user_id,
+                        organization_name=organization_name,
+                        location=location,
+                        domain=domain,
+                        risks=risks_dicts
+                    )
+
                     return FinalizedRisksResponse(
                         success=True,
                         message=f"Successfully finalized {len(finalized_risks)} risks. Total finalized risks: {total_risks}",
@@ -643,7 +672,34 @@ class RiskDatabaseService:
                     created_at=inserted_doc["created_at"],
                     updated_at=inserted_doc["updated_at"]
                 )
-                
+
+                # Convert Risk objects to dictionaries for vector service
+                risks_dicts = [
+                    {
+                        "_id": ObjectId(risk.id) if risk.id else ObjectId(),
+                        "description": risk.description,
+                        "category": risk.category,
+                        "likelihood": risk.likelihood,
+                        "impact": risk.impact,
+                        "treatment_strategy": risk.treatment_strategy,
+                        "asset_value": risk.asset_value,
+                        "department": risk.department,
+                        "risk_owner": risk.risk_owner,
+                        "security_impact": risk.security_impact,
+                        "target_date": risk.target_date,
+                        "risk_progress": risk.risk_progress,
+                        "residual_exposure": risk.residual_exposure
+                    }
+                    for risk in finalized_risks
+                ]
+                VectorIndexService.upsert_finalized_risks(
+                    user_id=user_id,
+                    organization_name=organization_name,
+                    location=location,
+                    domain=domain,
+                    risks=risks_dicts
+                )
+
                 return FinalizedRisksResponse(
                     success=True,
                     message=f"Successfully finalized {len(finalized_risks)} risks",
@@ -762,6 +818,7 @@ class RiskDatabaseService:
                 return FinalizedRisksResponse(success=False, message="Failed to delete risk", data=None)
             # Determine new total and handle empty case
             new_total = len(risks) - 1
+            VectorIndexService.delete_by_risk_id(user_id=user_id, risk_id=risk_id)
             if new_total <= 0:
                 # No risks remain; delete the entire document
                 finalized_risks_collection.delete_one({"_id": existing_doc["_id"]})

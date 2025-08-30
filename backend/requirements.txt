@@ -9,3 +9,5 @@ langchain
 langgraph
 python-dotenv
 typing-extensions 
+numpy
+pymilvus
