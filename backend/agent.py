@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
 from typing_extensions import TypedDict
 from dependencies import get_llm
 import json
@@ -15,6 +16,31 @@ except ImportError:
 
 # Load environment variables from .env
 load_dotenv()
+
+def make_llm_call_with_history(system_prompt: str, user_input: str, conversation_history: list) -> str:
+    """Standardized LLM call that includes conversation history for context"""
+    llm = get_llm()
+    
+    # Build messages with conversation history for context
+    messages = []
+    
+    # Add system message
+    messages.append(SystemMessage(content=system_prompt))
+    
+    # Add conversation history as context (last 5 exchanges to avoid token limits)
+    recent_history = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
+    for exchange in recent_history:
+        if exchange.get("user"):
+            messages.append(HumanMessage(content=exchange["user"]))
+        if exchange.get("assistant"):
+            messages.append(AIMessage(content=exchange["assistant"]))
+    
+    # Add current user input
+    messages.append(HumanMessage(content=user_input))
+    
+    # Make the call
+    response = llm.invoke(messages)
+    return response.content
 
 # 1. Define the state schema
 class LLMState(TypedDict):
@@ -188,14 +214,9 @@ User: Generate risks for my SaaS; use our standard scales.
 
 """
 
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_input)
-        ]
+        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
 
-        response = llm.invoke(messages)
-
-        content = response.content.strip()
+        content = response_content.strip()
         if content.startswith("```") and content.endswith("```"):
             # Strip code fences if model returned fenced JSON
             content = content.strip('`')
@@ -318,7 +339,8 @@ def risk_generation_node(state: LLMState):
         location = user_data.get("location", "the current location")
         domain = user_data.get("domain", "the industry domain")
         risks_applicable = user_data.get("risks_applicable", [])
-        
+        conversation_history = state.get("conversation_history", [])
+
         print(f"User data: organization={organization_name}, location={location}, domain={domain}")
         
         # Get user's risk profiles to use their specific scales
@@ -415,17 +437,12 @@ INTERPRETATION EXAMPLES (do not echo in output)
 """
 
         print("Sending request to LLM...")
-        messages = [
-            SystemMessage(content=risk_generation_prompt),
-            HumanMessage(content=state["input"])
-        ]
-
-        response = llm.invoke(messages)
-        print(f"LLM Response received: {response.content[:100]}...")  # First 100 chars only
+        response_content = make_llm_call_with_history(risk_generation_prompt, state["input"], conversation_history)
+        print(f"LLM Response received: {response_content[:100]}...")  # First 100 chars only
+        
         # Update conversation history
-        conversation_history = state.get("conversation_history", [])
         updated_history = conversation_history + [
-            {"user": state["input"], "assistant": response.content}
+            {"user": state["input"], "assistant": response_content}
         ]
         
         # Update risk context to include generated risks
@@ -437,7 +454,7 @@ INTERPRETATION EXAMPLES (do not echo in output)
         
         print("Risk generation completed successfully")
         return {
-            "output": response.content,
+            "output": response_content,
             "conversation_history": updated_history,
             "risk_context": risk_context,
             "risk_generation_requested": False  # Reset the flag
@@ -459,34 +476,28 @@ def risk_register_node(state: LLMState):
     """Handle risk register access requests"""
     print("Risk Register Node Activated")
     try:
-        llm = get_llm()
-
         user_input = state["input"]
         conversation_history = state.get("conversation_history", [])
         risk_context = state.get("risk_context", {})
         user_data = state.get("user_data", {})
         
-        prompt = f"""You are a Risk Management Agent. The user has requested to access their risk register or view their finalized risks.
-
-User request: "{user_input}"
+        system_prompt = """You are a Risk Management Agent. The user has requested to access their risk register or view their finalized risks.
 
 Provide a helpful response that:
 1. Acknowledges their request to access the risk register
 2. Explains that you'll open their risk register where they can view all their finalized risks
 3. Mentions that they can search, filter, and review their risk assessment data
-4. Keep the response concise and friendly
-
-Response:"""
+4. Keep the response concise and friendly"""
         
-        response = llm.invoke(prompt)
+        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
         
         # Update conversation history
         updated_history = conversation_history + [
-            {"user": user_input, "assistant": response.content}
+            {"user": user_input, "assistant": response_content}
         ]
         
         return {
-            "output": response.content,
+            "output": response_content,
             "conversation_history": updated_history,
             "risk_context": risk_context,
             "user_data": user_data,
@@ -691,140 +702,170 @@ To generate risks using these profiles, simply ask me to "generate risks" or "re
 
 # 5. Define the matrix recommendation node
 def matrix_recommendation_node(state: LLMState):
-    """Handle matrix recommendation requests and create appropriate risk profiles using LLM"""
     print("Matrix Recommendation Node Activated")
     try:
-        user_input = state["input"]
-        user_data = state.get("user_data", {})
+
+        user_input   = state.get("input", "")
+        user_data    = state.get("user_data", {}) or {}
+        risk_context = state.get("risk_context", {}) or {}
+        conversation_history = state.get("conversation_history", [])
+
+        allowed_sizes = {"3x3", "4x4", "5x5"}
         matrix_size = state.get("matrix_size", "5x5")
-        
-        # Get organization context from user_data
-        organization_name = user_data.get("organization_name", "your organization")
-        location = user_data.get("location", "your location")
-        domain = user_data.get("domain", "your industry")
-        
-        print(f"Creating {matrix_size} matrix recommendation for {organization_name} in {location}, {domain} domain")
-        
-        # Use LLM to generate context-specific matrix recommendation
+        if matrix_size not in allowed_sizes:
+            matrix_size = "5x5"
+
+        # Profile defaults
+        org = user_data.get("organization_name", "your organization")
+        loc = user_data.get("location", "your location")
+        dom = user_data.get("domain", "your industry")
+
         llm = get_llm()
-        
-        # Create prompt for LLM to generate matrix scales
-        prompt = f"""You are an expert Risk Management Specialist. Generate a {matrix_size} risk matrix specifically tailored for {organization_name} located in {location} operating in the {domain} domain.
 
-Create likelihood and impact scales that are relevant to this organization's specific context, industry, and location.
+        # ---------- Helpers ----------
+        def _snap_size(size_str: str, default_: str = "5x5") -> str:
+            try:
+                r, c = [int(x) for x in size_str.lower().split("x")]
+                avg = (r + c) / 2.0
+                return "3x3" if avg <= 3.5 else "4x4" if avg <= 4.5 else "5x5"
+            except Exception:
+                return default_
 
-Return ONLY valid JSON in this exact format:
+        def _rc(size_str: str) -> tuple[int, int]:
+            r, c = [int(x) for x in size_str.split("x")]
+            return r, c
 
+        def _ensure_levels(levels: list, count: int, base_titles: list[str]) -> list:
+            """Trim or pad to exactly 'count' items with simple placeholders if needed."""
+            levels = (levels or [])[:count]
+            while len(levels) < count:
+                i = len(levels) + 1
+                levels.append({"level": i, "title": base_titles[min(i-1, len(base_titles)-1)], "description": "Contextual description"})
+            # normalize level numbering
+            for i, lv in enumerate(levels, 1):
+                lv["level"] = i
+                lv.setdefault("title", base_titles[min(i-1, len(base_titles)-1)])
+                lv.setdefault("description", "Contextual description")
+            return levels
+
+        # ---------- Prompt (concise but strict) ----------
+        prompt = f"""
+You are a Risk Management Specialist.
+
+GOAL
+Return a tailored risk matrix (size 3x3, 4x4, or 5x5 only) as VALID JSON (no prose).
+
+INPUTS
+- USER_MESSAGE: free text from user
+- PROFILE_DEFAULTS: organization="{org}", location="{loc}", domain="{dom}"
+- DEFAULT_MATRIX_SIZE: "5x5"
+
+RULES
+1) JSON ONLY. No markdown. No explanations. No questions.
+2) Matrix size resolution (in order):
+   a) If USER_MESSAGE explicitly asks 3x3/4x4/5x5 -> use exactly that.
+   b) If another size is requested -> choose nearest among 3x3/4x4/5x5.
+   c) If no size -> use DEFAULT_MATRIX_SIZE.
+3) USER_MESSAGE values for organization/location/domain override PROFILE_DEFAULTS; otherwise use defaults.
+4) Likelihood list length must equal rows; Impact list length must equal columns.
+5) Provide 6–10 risk_categories (ideally 8), each with riskType + definition.
+6) Keep titles/descriptions concise and context-aware. No extra keys.
+
+OUTPUT SCHEMA (return exactly this shape):
 {{
+  "context": {{
+    "organization_name": "...",
+    "location": "...",
+    "domain": "...",
+    "matrix_size": "3x3|4x4|5x5"
+  }},
   "matrix_scales": {{
-    "likelihood": [
-      {{"level": 1, "title": "Scale Title", "description": "Detailed description"}},
-      {{"level": 2, "title": "Scale Title", "description": "Detailed description"}},
-      {{"level": 3, "title": "Scale Title", "description": "Detailed description"}}
-    ],
-    "impact": [
-      {{"level": 1, "title": "Scale Title", "description": "Detailed description"}},
-      {{"level": 2, "title": "Scale Title", "description": "Detailed description"}},
-      {{"level": 3, "title": "Scale Title", "description": "Detailed description"}}
-    ]
+    "likelihood": [{{"level": 1, "title": "...", "description": "..."}} /* R items */],
+    "impact":     [{{"level": 1, "title": "...", "description": "..."}} /* C items */]
   }},
   "risk_categories": [
-    {{
-      "riskType": "Strategic Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Operational Risk", 
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Financial Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Compliance Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Reputational Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Health and Safety Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Environmental Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Technology Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }}
+    {{"riskType": "...", "definition": "..."}}
+    /* 6–10 items */
   ]
 }}
+""".strip()
 
-For {matrix_size} matrix:
-- Likelihood scale should have {matrix_size.split('x')[0]} levels
-- Impact scale should have {matrix_size.split('x')[1]} levels
-- Make scales relevant to {domain} industry and {location} location
-- Ensure descriptions are specific to {organization_name}'s context
-- Use appropriate terminology for the industry and region
+        # ---------- LLM call ----------
+        content = make_llm_call_with_history(prompt, user_input, conversation_history).strip()
 
-IMPORTANT: Return ONLY valid JSON. Do not include any other text."""
+        # ---------- Extract & validate JSON ----------
+        response_text = ""
+        try:
+            # Best-effort JSON extraction
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start == -1 or end <= start:
+                raise ValueError("No JSON found in LLM response.")
+            data = json.loads(content[start:end])
 
-        print("Generating matrix recommendation with LLM...")
-        messages = [
-            SystemMessage(content=prompt)
-        ]
-        
-        response = llm.invoke(messages)
-        content = response.content.strip()
-        
-        print(f"LLM response received: {content[:100]}...")
-        
-        # Extract JSON from response
-        import json
-        json_start = content.find('{')
-        json_end = content.rfind('}') + 1
-        
-        if json_start != -1 and json_end > json_start:
-            json_str = content[json_start:json_end]
-            try:
-                data = json.loads(json_str)
-                
-                if "matrix_scales" in data and "risk_categories" in data:
-                    # Format the response with the LLM-generated data
-                    response_text = f"""🎯 **{matrix_size} Risk Matrix Recommendation for {organization_name}**
+            # Resolve context with fallbacks
+            ctx = data.get("context", {}) if isinstance(data, dict) else {}
+            resolved_org  = ctx.get("organization_name") or org
+            resolved_loc  = ctx.get("location") or loc
+            resolved_dom  = ctx.get("domain") or dom
+            resolved_size = ctx.get("matrix_size") or matrix_size
+            if resolved_size not in allowed_sizes:
+                resolved_size = _snap_size(resolved_size, matrix_size)
 
-I've created a comprehensive {matrix_size} risk assessment framework specifically tailored for {organization_name} in {location}!
+            R, C = _rc(resolved_size)
+
+            # Normalize scales length & levels
+            scales = data.get("matrix_scales") or {}
+            like = _ensure_levels(scales.get("likelihood"), R, ["Rare","Unlikely","Possible","Likely","Almost Certain"])
+            imp  = _ensure_levels(scales.get("impact"),     C, ["Minor","Moderate","Major","Severe","Critical"])
+
+            data["context"] = {
+                "organization_name": resolved_org,
+                "location": resolved_loc,
+                "domain": resolved_dom,
+                "matrix_size": resolved_size,
+            }
+            data["matrix_scales"] = {"likelihood": like, "impact": imp}
+            data["risk_categories"] = (data.get("risk_categories") or [])[:10]  # cap to 10
+
+            # Persist in risk_context
+            risk_context["generated_matrix"] = data
+            risk_context["matrix_size"] = resolved_size
+            risk_context["organization"] = resolved_org
+            risk_context["location"] = resolved_loc
+            risk_context["industry"] = resolved_dom
+
+            # Build SAME final response text as before
+            cat_count = len(data["risk_categories"])
+            response_text = f"""🎯 **{resolved_size} Risk Matrix Recommendation for {resolved_org}**
+
+I've created a comprehensive {resolved_size} risk assessment framework specifically tailored for {resolved_org} in {resolved_loc}!
 
 **Customized Matrix Configuration:**
-• **Matrix Size**: {matrix_size} ({matrix_size.split('x')[0]} likelihood × {matrix_size.split('x')[1]} impact levels)
-• **Industry Focus**: {domain} sector
-• **Location Context**: {location}
-• **Risk Categories**: 8 specialized categories with context-specific definitions
+• **Matrix Size**: {resolved_size} ({R} likelihood × {C} impact levels)
+• **Industry Focus**: {resolved_dom} sector
+• **Location Context**: {resolved_loc}
+• **Risk Categories**: {cat_count} specialized categories with context-specific definitions
 
 **Likelihood Scale:**"""
-                    
-                    for level in data["matrix_scales"]["likelihood"]:
-                        response_text += f"\n{level['level']}. **{level['title']}**: {level['description']}"
-                    
-                    response_text += "\n\n**Impact Scale:**"
-                    for level in data["matrix_scales"]["impact"]:
-                        response_text += f"\n{level['level']}. **{level['title']}**: {level['description']}"
-                    
-                    response_text += "\n\n**Customized Risk Categories:**"
-                    for i, category in enumerate(data["risk_categories"], 1):
-                        response_text += f"\n{i}. **{category['riskType']}**: {category['definition']}"
-                    
-                    response_text += f"""
+            for lv in like:
+                response_text += f"\n{lv.get('level')}. **{lv.get('title','')}**: {lv.get('description','')}"
+
+            response_text += "\n\n**Impact Scale:**"
+            for lv in imp:
+                response_text += f"\n{lv.get('level')}. **{lv.get('title','')}**: {lv.get('description','')}"
+
+            response_text += "\n\n**Customized Risk Categories:**"
+            for i, cat in enumerate(data["risk_categories"], 1):
+                response_text += f"\n{i}. **{cat.get('riskType','')}**: {cat.get('definition','')}"
+
+            response_text += f"""
 
 **Key Features:**
 ✅ Industry-specific terminology and scales
 ✅ Location-appropriate regulatory considerations
 ✅ Context-aware risk definitions
-✅ Scalable {matrix_size} assessment framework
+✅ Scalable {resolved_size} assessment framework
 
 **Next Steps:**
 The risk profile dashboard will open with these customized scales. You can:
@@ -832,49 +873,37 @@ The risk profile dashboard will open with these customized scales. You can:
 • Adjust scale definitions to match your specific needs
 • Apply this framework to start generating risks
 
-This tailored approach ensures your risk assessments are relevant to {organization_name}'s unique context in the {domain} industry."""
+This tailored approach ensures your risk assessments are relevant to {resolved_org}'s unique context in the {resolved_dom} industry."""
+            matrix_size = resolved_size
 
-                    print("Matrix recommendation generated successfully")
-                    
-                    # Store the generated matrix data for potential use
-                    risk_context = state.get("risk_context", {})
-                    risk_context["generated_matrix"] = data
-                    risk_context["matrix_size"] = matrix_size
-                    
-                else:
-                    print("Invalid LLM response format, falling back to default")
-                    response_text = f"I've created a {matrix_size} risk matrix framework. The risk profile dashboard will show you the standard risk categories with customizable scales."
-                    
-            except json.JSONDecodeError as e:
-                print(f"JSON decode error: {e}, falling back to default")
-                response_text = f"I've prepared a {matrix_size} risk matrix framework for you. The risk profile dashboard will allow you to customize the scales and categories."
-        else:
-            print("No valid JSON found in LLM response, falling back to default")
-            response_text = f"I've created a {matrix_size} risk assessment framework. You can customize the scales through the risk profile dashboard."
-        
-        # Update conversation history
-        conversation_history = state.get("conversation_history", [])
-        updated_history = conversation_history + [
-            {"user": user_input, "assistant": response_text}
-        ]
-        
+        except Exception as e:
+            print(f"Matrix JSON parse warning: {e}")
+            response_text = (
+                f"I've created a {matrix_size} risk matrix framework. "
+                "The risk profile dashboard will show you the standard risk categories with customizable scales."
+            )
+
+        # ---------- Conversation history ----------
+        history = state.get("conversation_history", [])
+        history.append({"user": user_input, "assistant": response_text})
+
+        # ---------- Return (unchanged shape/flags) ----------
         return {
             "output": response_text,
-            "conversation_history": updated_history,
-            "risk_context": risk_context,  # Use the updated risk_context instead of getting it again
+            "conversation_history": history,
+            "risk_context": risk_context,
             "user_data": user_data,
             "risk_generation_requested": False,
             "preference_update_requested": False,
             "risk_register_requested": False,
             "risk_profile_requested": False,
             "matrix_recommendation_requested": False,
-            "matrix_size": matrix_size
+            "matrix_size": matrix_size,
         }
-        
+
     except Exception as e:
         print(f"Error in matrix_recommendation_node: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         return {
             "output": f"I apologize, but I encountered an error while creating the matrix recommendation: {str(e)}. I'll create a standard {state.get('matrix_size', '5x5')} framework for you instead.",
             "conversation_history": state.get("conversation_history", []),
@@ -884,8 +913,10 @@ This tailored approach ensures your risk assessments are relevant to {organizati
             "preference_update_requested": False,
             "risk_register_requested": False,
             "risk_profile_requested": False,
-            "matrix_recommendation_requested": False
+            "matrix_recommendation_requested": False,
         }
+
+
 
 def update_risk_context(current_context: dict, user_input: str, assistant_response: str) -> dict:
     """Update risk context based on conversation"""
@@ -1020,15 +1051,9 @@ Do NOT return any other text, explanations, or formatting. Return ONLY the node 
     conversation_history = state.get("conversation_history", [])
     risk_context = state.get("risk_context", {})
     user_data = state.get("user_data", {})
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_input)
-    ]
-    
     try:
-        llm = get_llm()
-        response = llm.invoke(messages)
-        routing_decision = response.content.strip().lower()
+        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
+        routing_decision = response_content.strip().lower()
         
         # Validate the routing decision and set appropriate flags
         if "audit_facilitator" in routing_decision:
@@ -1099,21 +1124,15 @@ Do NOT return any other text, explanations, or formatting. Return ONLY the node 
         }
 
 
-# 5. Define the knowledge node
 def knowledge_node(state: LLMState):
     """Node for handling ISO 27001 and information security knowledge-related queries"""
     print("Knowledge Node Activated")
     try:
-        llm = get_llm()
-        
         user_input = state["input"]
         conversation_history = state.get("conversation_history", [])
         risk_context = state.get("risk_context", {})
         user_data = state.get("user_data", {})
-# SOURCE OF TRUTH (read-only)
-# ${ISO_27001_KNOWLEDGE_CONTENT}
 
-# Replacing with placeholder - actual content will be injected if available
         system_prompt = f"""
 ROLE
 You are an ISO/IEC 27001:2022 assistant. For any question about ISO 27001:2022 clauses, subclauses, or Annex A controls, you MUST answer strictly from the structured dataset provided below. For general questions about ISO 27001:2022 (not asking for specific clause/control text), you should still answer—succinctly—using general ISO knowledge, and, when helpful, point to the most relevant entries in the dataset.
@@ -1152,19 +1171,16 @@ MATCHING & NORMALIZATION
 
 
         """
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_input)
-        ]
-        response = llm.invoke(messages)
+        
+        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
 
         # Update conversation history
         updated_history = conversation_history + [
-            {"user": user_input, "assistant": response.content}
+            {"user": user_input, "assistant": response_content}
         ]
         
         return {
-            "output": response.content,
+            "output": response_content,
             "conversation_history": updated_history,
             "risk_context": risk_context,
             "user_data": user_data
@@ -1238,9 +1254,11 @@ builder.add_edge("risk_profile", END)
 builder.add_edge("matrix_recommendation", END)
 builder.add_edge("knowledge_node", END)
 
-graph = builder.compile()
+# Add memory to the graph
+memory = MemorySaver()
+graph = builder.compile(checkpointer=memory)
 
-def run_agent(message: str, conversation_history: list = None, risk_context: dict = None, user_data: dict = None):
+def run_agent(message: str, conversation_history: list = None, risk_context: dict = None, user_data: dict = None, thread_id: str = "default_session"):
     if conversation_history is None:
         conversation_history = []
     if risk_context is None:
@@ -1262,7 +1280,10 @@ def run_agent(message: str, conversation_history: list = None, risk_context: dic
         "is_audit_related": False,
         "is_risk_related": False
     }
-    result = graph.invoke(state)
+    
+    # Use thread_id for memory persistence within the session
+    config = {"configurable": {"thread_id": thread_id}}
+    result = graph.invoke(state, config)
     return result["output"], result["conversation_history"], result["risk_context"], result["user_data"]
 
 def get_risk_assessment_summary(conversation_history: list, risk_context: dict) -> str:
