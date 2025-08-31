@@ -467,8 +467,8 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
               matrixData.risk_categories?.map((category: any) => ({
                 riskType: category.riskType,
                 definition: category.definition,
-                likelihoodScale: matrixData.matrix_scales?.likelihood || [],
-                impactScale: matrixData.matrix_scales?.impact || [],
+                likelihoodScale: category.likelihoodScale || [],
+                impactScale: category.impactScale || [],
                 matrixSize: matrixSize,
               })) || [],
             totalProfiles: matrixData.risk_categories?.length || 0,

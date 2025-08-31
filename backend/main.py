@@ -530,7 +530,8 @@ async def create_matrix_recommendation(request: MatrixRecommendationRequest, cur
             matrix_size=matrix_size,
             organization_name=organization_name,
             location=location,
-            domain=domain
+            domain=domain,
+            user_id=user_id
         )
         
         if result.success:

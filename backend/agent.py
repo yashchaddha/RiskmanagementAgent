@@ -880,6 +880,29 @@ def matrix_recommendation_node(state: LLMState):
                 lv.setdefault("description", "Contextual description")
             return levels
 
+        # Get user's existing risk profiles to include all their risk categories
+        existing_risk_categories = []
+        username = user_data.get("username", "")
+        if username:
+            from database import RiskProfileDatabaseService
+            profiles_result = RiskProfileDatabaseService.get_user_risk_profiles(username)
+            if profiles_result.success and profiles_result.data and profiles_result.data.get("profiles"):
+                existing_profiles = profiles_result.data.get("profiles", [])
+                existing_risk_categories = [profile.get("riskType", "") for profile in existing_profiles if profile.get("riskType")]
+        
+        # If no existing profiles, use default comprehensive set
+        if not existing_risk_categories:
+            existing_risk_categories = [
+                "Strategic Risk", "Operational Risk", "Financial Risk", "Compliance Risk",
+                "Reputational Risk", "Health and Safety Risk", "Environmental Risk", "Technology Risk",
+                "Cybersecurity Risk", "Supply Chain Risk", "Market Risk", "Regulatory Risk"
+            ]
+        
+        # Create a simpler template for the LLM to follow
+        risk_categories_list = ",\n    ".join([
+            f'"{category}"' for category in existing_risk_categories
+        ])
+
         # Enhanced prompt with better query understanding and category-specific scales
         prompt = f"""
 You are a Risk Management Specialist creating customized risk matrices.
@@ -891,6 +914,7 @@ CONTEXT ANALYSIS
 - USER_MESSAGE: "{user_input}"
 - CONVERSATION_HISTORY: Available for context about "my organization"
 - PROFILE_DEFAULTS: organization="{org}", location="{loc}", domain="{dom}"
+- EXISTING_RISK_CATEGORIES: {len(existing_risk_categories)} categories from user's profile
 
 QUERY PARSING RULES
 1) **Organization Resolution**:
@@ -913,19 +937,24 @@ QUERY PARSING RULES
    - If other size mentioned -> choose nearest (3x3, 4x4, or 5x5)
    - If no size -> default to "5x5"
 
-CATEGORY-SPECIFIC SCALES
-Generate likelihood and impact descriptions tailored to the resolved domain:
-- **Healthcare**: Focus on patient safety, regulatory compliance, operational continuity
-- **Financial**: Focus on monetary loss, regulatory penalties, market impact
-- **Technology**: Focus on system availability, data security, innovation disruption
-- **Manufacturing**: Focus on production impact, safety incidents, supply chain
-- **General**: Use standard business impact terminology
+CRITICAL REQUIREMENT: CATEGORY-SPECIFIC DESCRIPTIONS
+For each risk category, you MUST generate UNIQUE likelihood and impact descriptions that are:
+- Specific to that risk category type (e.g., "Strategic Risk" vs "Operational Risk")
+- Tailored to the organization context (org, location, domain)
+- Different from other categories (no generic descriptions)
+
+Examples of category-specific descriptions:
+- **Strategic Risk**: "Market disruption affecting long-term business strategy"
+- **Operational Risk**: "Process failure impacting daily operations"
+- **Financial Risk**: "Revenue loss or cost overrun affecting profitability"
+- **Technology Risk**: "System outage or security breach affecting IT operations"
+- **Compliance Risk**: "Regulatory violation resulting in penalties or legal action"
 
 OUTPUT REQUIREMENTS
 - JSON ONLY (no markdown, no explanations)
-- Likelihood array length = matrix rows, Impact array length = matrix columns
-- 6-10 risk categories with domain-appropriate definitions
-- Descriptions should reflect the specific industry context
+- Each risk category MUST have unique likelihood and impact descriptions
+- Descriptions should be specific to the risk category AND organization context
+- Include ALL {len(existing_risk_categories)} risk categories listed below
 
 EXAMPLE MAPPINGS
 - "recommend 3x3 matrix for hospital in India" -> org="hospital", location="India", domain="healthcare", size="3x3"
@@ -941,16 +970,44 @@ OUTPUT SCHEMA:
       "domain": "...",
       "matrix_size": "3x3|4x4|5x5"
     }},
-    "matrix_scales": {{
-      "likelihood": [{{"level": 1, "title": "...", "description": "domain-specific description"}}],
-      "impact": [{{"level": 1, "title": "...", "description": "domain-specific description"}}]
-    }},
     "risk_categories": [
-      {{"riskType": "...", "definition": "domain-appropriate definition"}}
+      {{
+        "riskType": "Strategic Risk",
+        "definition": "Context-specific definition for Strategic Risk in the organization",
+        "likelihoodScale": [
+          {{"level": 1, "title": "Rare", "description": "Strategic risk-specific description for level 1"}},
+          {{"level": 2, "title": "Unlikely", "description": "Strategic risk-specific description for level 2"}},
+          {{"level": 3, "title": "Possible", "description": "Strategic risk-specific description for level 3"}},
+          {{"level": 4, "title": "Likely", "description": "Strategic risk-specific description for level 4"}},
+          {{"level": 5, "title": "Almost Certain", "description": "Strategic risk-specific description for level 5"}}
+        ],
+        "impactScale": [
+          {{"level": 1, "title": "Minor", "description": "Strategic risk-specific impact description for level 1"}},
+          {{"level": 2, "title": "Moderate", "description": "Strategic risk-specific impact description for level 2"}},
+          {{"level": 3, "title": "Major", "description": "Strategic risk-specific impact description for level 3"}},
+          {{"level": 4, "title": "Severe", "description": "Strategic risk-specific impact description for level 4"}},
+          {{"level": 5, "title": "Critical", "description": "Strategic risk-specific impact description for level 5"}}
+        ]
+      }}
     ]
   }},
   "response_text": "A comprehensive, engaging response explaining the matrix recommendation. Include emojis, formatting, and context-appropriate language. Explain what was created, highlight key features, and provide next steps. Be conversational and helpful."
 }}
+
+REQUIRED RISK CATEGORIES TO INCLUDE:
+{risk_categories_list}
+
+For each risk category above, create a complete entry with:
+- riskType: The exact category name
+- definition: Context-specific definition for that risk type
+- likelihoodScale: 5 levels with unique descriptions specific to that risk category
+- impactScale: 5 levels with unique descriptions specific to that risk category
+
+IMPORTANT: 
+1. Include ALL {len(existing_risk_categories)} risk categories listed above
+2. Each category MUST have unique, category-specific likelihood and impact descriptions
+3. Do not use generic descriptions that are the same across categories
+4. Make descriptions specific to the risk category type and organization context
 """.strip()
 
         # ---------- LLM call ----------
@@ -986,10 +1043,31 @@ OUTPUT SCHEMA:
 
             R, C = _rc(resolved_size)
 
-            # Normalize scales length & levels
-            scales = matrix_data.get("matrix_scales") or {}
-            like = _ensure_levels(scales.get("likelihood"), R, ["Rare","Unlikely","Possible","Likely","Almost Certain"])
-            imp  = _ensure_levels(scales.get("impact"),     C, ["Minor","Moderate","Major","Severe","Critical"])
+            # Process risk categories with individual scales
+            risk_categories = matrix_data.get("risk_categories", [])
+            processed_categories = []
+            
+            for category in risk_categories:
+                # Ensure each category has proper likelihood and impact scales
+                likelihood_scale = _ensure_levels(
+                    category.get("likelihoodScale", []), 
+                    R, 
+                    ["Rare","Unlikely","Possible","Likely","Almost Certain"]
+                )
+                impact_scale = _ensure_levels(
+                    category.get("impactScale", []), 
+                    C, 
+                    ["Minor","Moderate","Major","Severe","Critical"]
+                )
+                
+                processed_category = {
+                    "riskType": category.get("riskType", "Unknown Risk"),
+                    "definition": category.get("definition", "Risk definition"),
+                    "likelihoodScale": likelihood_scale,
+                    "impactScale": impact_scale,
+                    "matrixSize": resolved_size
+                }
+                processed_categories.append(processed_category)
 
             matrix_data["context"] = {
                 "organization_name": resolved_org,
@@ -997,8 +1075,7 @@ OUTPUT SCHEMA:
                 "domain": resolved_dom,
                 "matrix_size": resolved_size,
             }
-            matrix_data["matrix_scales"] = {"likelihood": like, "impact": imp}
-            matrix_data["risk_categories"] = (matrix_data.get("risk_categories") or [])[:10]  # cap to 10
+            matrix_data["risk_categories"] = processed_categories[:10]  # cap to 10
 
             # Persist in risk_context
             risk_context["generated_matrix"] = matrix_data

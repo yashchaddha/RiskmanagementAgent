@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import List, Optional, Any
 from pymongo import MongoClient
 from bson import ObjectId
-from vector_index import VectorIndexService
+from vector_index import VectorIndexService 
 from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisk, FinalizedRisks, FinalizedRisksResponse
 
 # Database result wrapper class
@@ -1489,7 +1489,7 @@ class RiskProfileDatabaseService:
             # If organization context is provided, use LLM-generated recommendation
             if organization_name and location and domain:
                 result = await RiskProfileDatabaseService.generate_matrix_recommendation_with_llm(
-                    matrix_size, organization_name, location, domain
+                    matrix_size, organization_name, location, domain, user_id
                 )
                 
                 if result.success:
@@ -1563,8 +1563,8 @@ class RiskProfileDatabaseService:
             return DatabaseResult(False, f"Error applying matrix configuration: {str(e)}")
 
     @staticmethod
-    async def generate_matrix_recommendation_with_llm(matrix_size: str, organization_name: str, location: str, domain: str) -> DatabaseResult:
-        """Generate matrix recommendation using LLM based on organization context"""
+    async def generate_matrix_recommendation_with_llm(matrix_size: str, organization_name: str, location: str, domain: str, user_id: str = None) -> DatabaseResult:
+        """Generate matrix recommendation using LLM based on organization context and user's existing risk profiles"""
         try:
             from openai import OpenAI
             import json
@@ -1576,10 +1576,34 @@ class RiskProfileDatabaseService:
             
             client = OpenAI(api_key=api_key)
             
+            # Get user's existing risk profiles to include all their risk categories
+            existing_risk_categories = []
+            if user_id:
+                profiles_result = RiskProfileDatabaseService.get_user_risk_profiles(user_id)
+                if profiles_result.success and profiles_result.data and profiles_result.data.get("profiles"):
+                    existing_profiles = profiles_result.data.get("profiles", [])
+                    existing_risk_categories = [profile.get("riskType", "") for profile in existing_profiles if profile.get("riskType")]
+            
+            # If no existing profiles, use default comprehensive set
+            if not existing_risk_categories:
+                existing_risk_categories = [
+                    "Strategic Risk", "Operational Risk", "Financial Risk", "Compliance Risk",
+                    "Reputational Risk", "Health and Safety Risk", "Environmental Risk", "Technology Risk",
+                    "Cybersecurity Risk", "Supply Chain Risk", "Market Risk", "Regulatory Risk"
+                ]
+            
+            # Create risk categories JSON for the prompt
+            risk_categories_json = ",\n    ".join([
+                f'{{"riskType": "{category}", "definition": "Context-specific definition for {organization_name} in {domain} industry"}}'
+                for category in existing_risk_categories
+            ])
+            
             # Create prompt for LLM to generate matrix scales
             prompt = f"""You are an expert Risk Management Specialist. Generate a {matrix_size} risk matrix specifically tailored for {organization_name} located in {location} operating in the {domain} domain.
 
 Create likelihood and impact scales that are relevant to this organization's specific context, industry, and location.
+
+IMPORTANT: Include ALL the following risk categories in your response. Do not limit to just 3 categories.
 
 Return ONLY valid JSON in this exact format:
 
@@ -1597,38 +1621,7 @@ Return ONLY valid JSON in this exact format:
     ]
   }},
   "risk_categories": [
-    {{
-      "riskType": "Strategic Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Operational Risk", 
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Financial Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Compliance Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Reputational Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Health and Safety Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Environmental Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }},
-    {{
-      "riskType": "Technology Risk",
-      "definition": "Context-specific definition for {organization_name}"
-    }}
+    {risk_categories_json}
   ]
 }}
 
@@ -1638,6 +1631,7 @@ For {matrix_size} matrix:
 - Make scales relevant to {domain} industry and {location} location
 - Ensure descriptions are specific to {organization_name}'s context
 - Use appropriate terminology for the industry and region
+- Include ALL {len(existing_risk_categories)} risk categories listed above
 
 IMPORTANT: Return ONLY valid JSON. Do not include any other text."""
             
