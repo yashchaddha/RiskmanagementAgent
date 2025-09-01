@@ -227,76 +227,6 @@ class RiskDatabaseService:
                 data=None
             )
     
-    @staticmethod
-    async def get_user_risks(user_id: str) -> RiskResponse:
-        try:
-            # Verify user exists first
-            user = users_collection.find_one({"username": user_id})
-            if not user:
-                return RiskResponse(
-                    success=False,
-                    message=f"User {user_id} not found in database",
-                    data=None
-                )
-            
-            # Find the user's generated risks document (only one per user now)
-            risk_doc = generated_risks_collection.find_one({"user_ref": user["_id"]})
-            
-            if not risk_doc:
-                return RiskResponse(
-                    success=True,
-                    message="No risks found for this user",
-                    data=None
-                )
-            
-            # Convert to GeneratedRisks model
-            risks = [
-                Risk(
-                    id=str(risk.get("_id", "")),
-                    description=risk["description"],
-                    category=risk["category"],
-                    likelihood=risk["likelihood"],
-                    impact=risk["impact"],
-                    treatment_strategy=risk["treatment_strategy"],
-                    is_selected=risk["is_selected"],
-                    asset_value=risk.get("asset_value"),
-                    department=risk.get("department"),
-                    risk_owner=risk.get("risk_owner"),
-                    security_impact=risk.get("security_impact"),
-                    target_date=risk.get("target_date"),
-                    risk_progress=risk.get("risk_progress", "Identified"),
-                    residual_exposure=risk.get("residual_exposure"),
-                    created_at=risk["created_at"],
-                    updated_at=risk["updated_at"]
-                )
-                for risk in risk_doc["risks"]
-            ]
-            
-            generated_risks = GeneratedRisks(
-                id=str(risk_doc["_id"]),
-                user_id=risk_doc["user_id"],
-                organization_name=risk_doc["organization_name"],
-                location=risk_doc["location"],
-                domain=risk_doc["domain"],
-                risks=risks,
-                total_risks=risk_doc["total_risks"],
-                selected_risks=risk_doc["selected_risks"],
-                created_at=risk_doc["created_at"],
-                updated_at=risk_doc["updated_at"]
-            )
-            
-            return RiskResponse(
-                success=True,
-                message=f"Found {len(risks)} risks for this user",
-                data=generated_risks
-            )
-            
-        except Exception as e:
-            return RiskResponse(
-                success=False,
-                message=f"Error retrieving risks: {str(e)}",
-                data=None
-            )
     
     @staticmethod
     async def update_risk_selection(user_id: str, risk_index: int, is_selected: bool) -> RiskResponse:
@@ -372,88 +302,6 @@ class RiskDatabaseService:
                 data=None
             )
     
-    @staticmethod
-    async def get_all_risks_with_users() -> RiskResponse:
-        """Get all generated risks with user information for admin purposes"""
-        try:
-            # Aggregate to join with users collection
-            pipeline = [
-                {
-                    "$lookup": {
-                        "from": "users",
-                        "localField": "user_id",
-                        "foreignField": "username",
-                        "as": "user_info"
-                    }
-                },
-                {
-                    "$unwind": "$user_info"
-                },
-                {
-                    "$sort": {"created_at": -1}
-                }
-            ]
-            
-            risk_documents = list(generated_risks_collection.aggregate(pipeline))
-            
-            if not risk_documents:
-                return RiskResponse(
-                    success=True,
-                    message="No risks found in database",
-                    data=None
-                )
-            
-            # Convert to GeneratedRisks models
-            generated_risks_list = []
-            for doc in risk_documents:
-                risks = [
-                    Risk(
-                        id=str(risk.get("_id", "")),
-                        description=risk["description"],
-                        category=risk["category"],
-                        likelihood=risk["likelihood"],
-                        impact=risk["impact"],
-                        treatment_strategy=risk["treatment_strategy"],
-                        is_selected=risk["is_selected"],
-                        asset_value=risk.get("asset_value"),
-                        department=risk.get("department"),
-                        risk_owner=risk.get("risk_owner"),
-                        security_impact=risk.get("security_impact"),
-                        target_date=risk.get("target_date"),
-                        risk_progress=risk.get("risk_progress", "Identified"),
-                        residual_exposure=risk.get("residual_exposure"),
-                        created_at=risk["created_at"],
-                        updated_at=risk["updated_at"]
-                    )
-                    for risk in doc["risks"]
-                ]
-                
-                generated_risks = GeneratedRisks(
-                    id=str(doc["_id"]),
-                    user_id=doc["user_id"],
-                    organization_name=doc["organization_name"],
-                    location=doc["location"],
-                    domain=doc["domain"],
-                    risks=risks,
-                    total_risks=doc["total_risks"],
-                    selected_risks=doc["selected_risks"],
-                    created_at=doc["created_at"],
-                    updated_at=doc["updated_at"]
-                )
-                generated_risks_list.append(generated_risks)
-            
-            return RiskResponse(
-                success=True,
-                message=f"Found {len(generated_risks_list)} risk assessments",
-                data=generated_risks_list
-            )
-            
-        except Exception as e:
-            return RiskResponse(
-                success=False,
-                message=f"Error retrieving all risks: {str(e)}",
-                data=None
-            )
     
     @staticmethod
     async def save_finalized_risks(
@@ -783,103 +631,6 @@ class RiskDatabaseService:
                 data=None
             )
     
-    @staticmethod
-    async def delete_finalized_risk(user_id: str, risk_id: str) -> FinalizedRisksResponse:
-        """Delete a specific finalized risk by its ID"""
-        try:
-            # Verify user exists
-            user = users_collection.find_one({"username": user_id})
-            if not user:
-                return FinalizedRisksResponse(success=False, message=f"User {user_id} not found", data=None)
-            # Find user's finalized risks document
-            existing_doc = finalized_risks_collection.find_one({"user_ref": user["_id"]})
-            if not existing_doc:
-                return FinalizedRisksResponse(success=False, message="No finalized risks found for user", data=None)
-            # Ensure the risk to delete exists
-            risks = existing_doc.get("risks", [])
-            if not any(str(risk.get("_id", "")) == risk_id for risk in risks):
-                return FinalizedRisksResponse(success=False, message="Risk not found", data=None)
-            # Remove the risk
-            from bson import ObjectId
-            try:
-                # Try to convert to ObjectId if it's a valid ObjectId string
-                risk_object_id = ObjectId(risk_id)
-                result = finalized_risks_collection.update_one(
-                    {"_id": existing_doc["_id"]},
-                    {"$pull": {"risks": {"_id": risk_object_id}}}
-                )
-            except Exception:
-                # If conversion fails, it might be stored as string, so try string comparison
-                result = finalized_risks_collection.update_one(
-                    {"_id": existing_doc["_id"]},
-                    {"$pull": {"risks": {"_id": risk_id}}}
-                )
-            if result.modified_count == 0:
-                return FinalizedRisksResponse(success=False, message="Failed to delete risk", data=None)
-            # Determine new total and handle empty case
-            new_total = len(risks) - 1
-            VectorIndexService.delete_by_risk_id(user_id=user_id, risk_id=risk_id)
-            if new_total <= 0:
-                # No risks remain; delete the entire document
-                finalized_risks_collection.delete_one({"_id": existing_doc["_id"]})
-                # Return empty FinalizedRisks model instead of None
-                empty_finalized_model = FinalizedRisks(
-                    id="",
-                    user_id=existing_doc.get("user_id", ""),
-                    organization_name=existing_doc.get("organization_name", ""),
-                    location=existing_doc.get("location", ""),
-                    domain=existing_doc.get("domain", ""),
-                    risks=[],
-                    total_risks=0,
-                    created_at=existing_doc.get("created_at"),
-                    updated_at=datetime.utcnow()
-                )
-                return FinalizedRisksResponse(
-                    success=True,
-                    message="All finalized risks deleted; document removed.",
-                    data=empty_finalized_model
-                )
-            # Update remaining document with new count and timestamp
-            finalized_risks_collection.update_one(
-                {"_id": existing_doc["_id"]},
-                {"$set": {"total_risks": new_total, "updated_at": datetime.utcnow()}}
-            )
-            # Retrieve updated document
-            updated_doc = finalized_risks_collection.find_one({"_id": existing_doc["_id"]})
-            # Convert to FinalizedRisks model
-            updated_risks = [
-                FinalizedRisk(
-                    id=str(r.get("_id", "")),
-                    description=r["description"],
-                    category=r["category"],
-                    likelihood=r["likelihood"],
-                    impact=r["impact"],
-                    treatment_strategy=r["treatment_strategy"],
-                    asset_value=r.get("asset_value"),
-                    department=r.get("department"),
-                    risk_owner=r.get("risk_owner"),
-                    security_impact=r.get("security_impact"),
-                    target_date=r.get("target_date"),
-                    risk_progress=r.get("risk_progress", "Identified"),
-                    residual_exposure=r.get("residual_exposure"),
-                    created_at=r["created_at"],
-                    updated_at=r["updated_at"]
-                ) for r in updated_doc.get("risks", [])
-            ]
-            finalized_model = FinalizedRisks(
-                id=str(updated_doc["_id"]),
-                user_id=updated_doc.get("user_id", ""),
-                organization_name=updated_doc.get("organization_name", ""),
-                location=updated_doc.get("location", ""),
-                domain=updated_doc.get("domain", ""),
-                risks=updated_risks,
-                total_risks=updated_doc.get("total_risks", 0),
-                created_at=updated_doc.get("created_at"),
-                updated_at=updated_doc.get("updated_at")
-            )
-            return FinalizedRisksResponse(success=True, message="Risk deleted successfully", data=finalized_model)
-        except Exception as e:
-            return FinalizedRisksResponse(success=False, message=f"Error deleting risk: {str(e)}", data=None)
 
     @staticmethod
     async def delete_finalized_risk_by_index(user_id: str, risk_index: int) -> FinalizedRisksResponse:
@@ -981,51 +732,6 @@ class RiskDatabaseService:
             return FinalizedRisksResponse(success=False, message=f"Error deleting risk by index: {str(e)}", data=None)
 
 
-class UserDatabaseService:
-    @staticmethod
-    async def update_user_preferences(
-        username: str,
-        likelihood: List[str],
-        impact: List[str]
-    ) -> dict:
-        """Update user's risk preference settings"""
-        try:
-
-            # Update user document with new preferences
-            result = users_collection.update_one(
-                {"username": username},
-                {
-                    "$set": {
-                        "likelihood": likelihood,
-                        "impact": impact,
-                        "updated_at": datetime.utcnow()
-                    }
-                }
-            )
-            
-            if result.modified_count > 0:
-                return {
-                    "success": True,
-                    "message": f"Successfully updated preferences for user {username}",
-                    "likelihood": likelihood,
-                    "impact": impact
-                }
-            else:
-                return {
-                    "success": False,
-                    "message": f"User {username} not found or no changes made",
-                    "likelihood": None,
-                    "impact": None
-                }
-                
-        except Exception as e:
-            return {
-                "success": False,
-                "message": f"Error updating user preferences: {str(e)}",
-                "likelihood": None,
-                "impact": None
-            }
-
     @staticmethod
     async def update_risk_field(
         user_id: str,
@@ -1100,7 +806,7 @@ class UserDatabaseService:
             return {
                 "success": False,
                 "message": f"Error updating risk field: {str(e)}"
-            } 
+            }
 
 class RiskProfileDatabaseService:
     """Service for managing user risk profiles"""
@@ -1331,153 +1037,7 @@ class RiskProfileDatabaseService:
                 data=None
             )
 
-    @staticmethod
-    def get_matrix_preview_data(matrix_size: str) -> dict:
-        """Get preview data for a specific matrix size without saving to database"""
-        # Define matrix-specific scales
-        matrix_scales = {
-            "3x3": {
-                "likelihood": [
-                    {"level": 1, "title": "Low", "description": "Unlikely to occur"},
-                    {"level": 2, "title": "Medium", "description": "May occur occasionally"},
-                    {"level": 3, "title": "High", "description": "Likely to occur frequently"}
-                ],
-                "impact": [
-                    {"level": 1, "title": "Low", "description": "Minimal impact on operations"},
-                    {"level": 2, "title": "Medium", "description": "Moderate impact on operations"},
-                    {"level": 3, "title": "High", "description": "Significant impact on operations"}
-                ]
-            },
-            "4x4": {
-                "likelihood": [
-                    {"level": 1, "title": "Rare", "description": "Very unlikely to occur"},
-                    {"level": 2, "title": "Unlikely", "description": "May occur in exceptional circumstances"},
-                    {"level": 3, "title": "Likely", "description": "Expected to occur"},
-                    {"level": 4, "title": "Very Likely", "description": "Almost certain to occur"}
-                ],
-                "impact": [
-                    {"level": 1, "title": "Minor", "description": "Minimal impact on objectives"},
-                    {"level": 2, "title": "Moderate", "description": "Noticeable impact on objectives"},
-                    {"level": 3, "title": "Major", "description": "Significant impact on objectives"},
-                    {"level": 4, "title": "Severe", "description": "Critical impact on objectives"}
-                ]
-            },
-            "5x5": {
-                "likelihood": [
-                    {"level": 1, "title": "Rare", "description": "Very unlikely to occur"},
-                    {"level": 2, "title": "Unlikely", "description": "May occur in exceptional circumstances"},
-                    {"level": 3, "title": "Possible", "description": "Could occur"},
-                    {"level": 4, "title": "Likely", "description": "Expected to occur"},
-                    {"level": 5, "title": "Very Likely", "description": "Almost certain to occur"}
-                ],
-                "impact": [
-                    {"level": 1, "title": "Minor", "description": "Minimal impact on objectives"},
-                    {"level": 2, "title": "Moderate", "description": "Noticeable impact on objectives"},
-                    {"level": 3, "title": "Major", "description": "Significant impact on objectives"},
-                    {"level": 4, "title": "Severe", "description": "Critical impact on objectives"},
-                    {"level": 5, "title": "Critical", "description": "Catastrophic impact on objectives"}
-                ]
-            }
-        }
-        
-        # Get the scales for the requested matrix size
-        scales = matrix_scales.get(matrix_size, matrix_scales["5x5"])
-        
-        # Define risk categories
-        risk_categories = [
-            {
-                "riskType": "Strategic Risk",
-                "definition": "Risks related to long-term business objectives, market positioning, and strategic decisions that could impact the organization's ability to achieve its goals.",
-                "matrixSize": matrix_size
-            },
-            {
-                "riskType": "Operational Risk",
-                "definition": "Risks arising from day-to-day business processes, systems, and procedures that could affect operational efficiency and effectiveness.",
-                "matrixSize": matrix_size
-            },
-            {
-                "riskType": "Financial Risk",
-                "definition": "Risks related to financial performance, cash flow, investments, and financial reporting that could impact the organization's financial stability.",
-                "matrixSize": matrix_size
-            },
-            {
-                "riskType": "Compliance Risk",
-                "definition": "Risks associated with regulatory requirements, legal obligations, and compliance frameworks that could result in penalties or legal action.",
-                "matrixSize": matrix_size
-            },
-            {
-                "riskType": "Reputational Risk",
-                "definition": "Risks that could damage the organization's brand image, stakeholder relationships, and market reputation.",
-                "matrixSize": matrix_size
-            },
-            {
-                "riskType": "Health and Safety Risk",
-                "definition": "Risks related to employee and public safety, workplace hazards, and health-related incidents that could result in injuries or health issues.",
-                "matrixSize": matrix_size
-            },
-            {
-                "riskType": "Environmental Risk",
-                "definition": "Risks associated with environmental impact, sustainability, and environmental compliance that could affect the organization's environmental footprint.",
-                "matrixSize": matrix_size
-            },
-            {
-                "riskType": "Technology Risk",
-                "definition": "Risks related to IT systems, cybersecurity, data protection, and technological infrastructure that could impact digital operations.",
-                "matrixSize": matrix_size
-            }
-        ]
-        
-        # Create preview data without saving to database
-        preview_profiles = []
-        for category in risk_categories:
-            profile_data = {
-                "riskType": category["riskType"],
-                "definition": category["definition"],
-                "likelihoodScale": scales["likelihood"],
-                "impactScale": scales["impact"],
-                "matrixSize": matrix_size
-            }
-            preview_profiles.append(profile_data)
-        
-        return {
-            "matrix_size": matrix_size,
-            "profiles": preview_profiles
-        }
 
-    @staticmethod
-    async def create_matrix_risk_profiles(user_id: str, matrix_size: str) -> DatabaseResult:
-        """Create risk profiles for a specific matrix size (3x3, 4x4, 5x5)"""
-        try:
-            # Get preview data
-            preview_data = RiskProfileDatabaseService.get_matrix_preview_data(matrix_size)
-            
-            # Create new profiles with the specified matrix size
-            profile_ids = []
-            for profile in preview_data["profiles"]:
-                profile_data = {
-                    "userId": user_id,
-                    "riskType": profile["riskType"],
-                    "definition": profile["definition"],
-                    "likelihoodScale": profile["likelihoodScale"],
-                    "impactScale": profile["impactScale"],
-                    "matrixSize": profile["matrixSize"],
-                    "createdAt": datetime.utcnow(),
-                    "updatedAt": datetime.utcnow()
-                }
-                
-                result = risk_profiles_collection.insert_one(profile_data)
-                profile_ids.append(str(result.inserted_id))
-            
-            # Update user's risks_applicable field
-            users_collection.update_one(
-                {"username": user_id},
-                {"$set": {"risks_applicable": profile_ids}}
-            )
-            
-            return DatabaseResult(True, f"Successfully created {matrix_size} risk profiles", {"profile_ids": profile_ids})
-            
-        except Exception as e:
-            return DatabaseResult(False, f"Error creating matrix risk profiles: {str(e)}")
 
     @staticmethod
     async def apply_matrix_recommendation(user_id: str, matrix_size: str, organization_name: str = None, location: str = None, domain: str = None) -> DatabaseResult:
@@ -1518,11 +1078,11 @@ class RiskProfileDatabaseService:
                     
                     return DatabaseResult(True, f"Successfully applied AI-generated {matrix_size} matrix recommendation", {"profile_ids": profile_ids})
                 else:
-                    # Fallback to default matrix if LLM generation fails
-                    return await RiskProfileDatabaseService.create_matrix_risk_profiles(user_id, matrix_size)
+                    # Fallback: return error if LLM generation fails
+                    return DatabaseResult(False, "Failed to generate matrix recommendation and no fallback available")
             else:
-                # Use default matrix if no organization context provided
-                return await RiskProfileDatabaseService.create_matrix_risk_profiles(user_id, matrix_size)
+                # Return error if no organization context provided
+                return DatabaseResult(False, "Organization context required for matrix recommendation")
             
         except Exception as e:
             return DatabaseResult(False, f"Error applying matrix recommendation: {str(e)}")

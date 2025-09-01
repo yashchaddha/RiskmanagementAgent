@@ -2,6 +2,7 @@
 import os
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from dotenv import load_dotenv
+from langsmith.wrappers import wrap_openai
 
 load_dotenv()
 

@@ -13,10 +13,15 @@ from typing import List, Dict, Any
 from dependencies import get_llm
 import json
 from knowledge_base import ISO_27001_KNOWLEDGE
+from langsmith import traceable
 
 # Load environment variables from .env
 load_dotenv()
 
+# Set up LangSmith project name
+LANGSMITH_PROJECT_NAME = os.getenv("LANGCHAIN_PROJECT", "risk-management-agent")
+
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="make_llm_call_with_history")
 def make_llm_call_with_history(system_prompt: str, user_input: str, conversation_history: list) -> str:
     """Standardized LLM call that includes conversation history for context"""
     llm = get_llm()
@@ -125,6 +130,7 @@ class LLMState(TypedDict):
     is_risk_related: bool  # Flag to indicate if query is risk-related
 
 # 2. Define the risk node
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="risk_node")
 def risk_node(state: LLMState):
     print("Risk Node Activated")
     try:
@@ -410,6 +416,7 @@ User: Generate risks for my SaaS; use our standard scales.
         }
 
 # 3. Define the risk generation node
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="risk_generation_node")
 def risk_generation_node(state: LLMState):
     """Generate organization-specific risks based on user data"""
     print("Risk Generation Node Activated")
@@ -555,6 +562,7 @@ INTERPRETATION EXAMPLES (do not echo in output)
         }
 
 # 4. Define the preference update node
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="risk_register_node")
 def risk_register_node(state: LLMState):
     """Open the risk register, and when the user asks to find/filter risks,
     perform semantic search via a LangGraph tool call (OpenAI model)."""
@@ -651,6 +659,7 @@ You are the Risk Register assistant.
             "risk_register_requested": False
         }
 
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="preference_update_node")
 def preference_update_node(state: LLMState):
     """Handle user preference updates for risk profiles"""
     print("Preference Update Node Activated")
@@ -764,6 +773,7 @@ Your risk preferences are now managed through individual risk profiles. You curr
         }
 
 # 4. Define the risk profile node
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="risk_profile_node")
 def risk_profile_node(state: LLMState):
     """Handle risk profile requests and display user's risk categories and scales"""
     print("Risk Profile Node Activated")
@@ -833,6 +843,7 @@ To generate risks using these profiles, simply ask me to "generate risks" or "re
         }
 
 # 5. Define the matrix recommendation node
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="matrix_recommendation_node")
 def matrix_recommendation_node(state: LLMState):
     print("Matrix Recommendation Node Activated")
     try:
@@ -1153,6 +1164,7 @@ def update_risk_context(current_context: dict, user_input: str, assistant_respon
     
     return context
 
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="orchestrator_node")
 def orchestrator_node(state: LLMState) -> LLMState:
     """Node responsible for routing user queries to relevant nodes based on intent classification"""
     print("Orchestrator Activated")
@@ -1355,6 +1367,7 @@ Do NOT return any other text, explanations, or formatting. Return ONLY the node 
         }
 
 
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="knowledge_node")
 def knowledge_node(state: LLMState):
     """Node for handling ISO 27001 and information security knowledge-related queries"""
     print("Knowledge Node Activated")
@@ -1489,6 +1502,7 @@ builder.add_edge("knowledge_node", END)
 memory = MemorySaver()
 graph = builder.compile(checkpointer=memory)
 
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="run_agent")
 def run_agent(message: str, conversation_history: list = None, risk_context: dict = None, user_data: dict = None, thread_id: str = "default_session"):
     if conversation_history is None:
         conversation_history = []
@@ -1517,34 +1531,6 @@ def run_agent(message: str, conversation_history: list = None, risk_context: dic
     result = graph.invoke(state, config)
     return result["output"], result["conversation_history"], result["risk_context"], result["user_data"]
 
-def get_risk_assessment_summary(conversation_history: list, risk_context: dict) -> str:
-    """Generate a summary of the risk assessment session"""
-    try:
-        llm = get_llm()
-
-        # Format conversation for summary
-        conversation_text = "\n".join([
-            f"User: {msg['user']}\nAssistant: {msg['assistant']}" 
-            for msg in conversation_history
-        ])
-        
-        prompt = f"""Based on the following risk management conversation, provide a concise summary of:
-        1. Key risks identified
-        2. Compliance requirements discussed
-        3. Recommendations provided
-        4. Next steps suggested
-
-        Conversation:
-        {conversation_text}
-
-        Risk Context: {risk_context}
-
-        Please provide a structured summary that could be used for reporting purposes."""
-        
-        response = llm.invoke(prompt)
-        return response.content
-    except Exception as e:
-        return "Unable to generate risk assessment summary due to an error."
 
 def get_finalized_risks_summary(finalized_risks: list, organization_name: str, location: str, domain: str) -> str:
     """Generate a comprehensive summary based on finalized risks"""

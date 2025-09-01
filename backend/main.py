@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from auth import router as auth_router, get_current_user
-from agent import run_agent, get_risk_assessment_summary, get_finalized_risks_summary, GREETING_MESSAGE
+from agent import run_agent, get_finalized_risks_summary, GREETING_MESSAGE
 from database import RiskDatabaseService, RiskProfileDatabaseService
 from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisks, FinalizedRisksResponse
 from pydantic import BaseModel
@@ -35,10 +35,6 @@ class GreetingRequest(BaseModel):
 class GreetingResponse(BaseModel):
     greeting: str
 
-class RiskSummaryRequest(BaseModel):
-    conversation_history: List[dict]
-    risk_context: Optional[Dict[str, Any]] = {}
-
 class RiskSummaryResponse(BaseModel):
     summary: str
 
@@ -65,27 +61,6 @@ def read_root():
 def health_check():
     return {"status": "healthy", "service": "Risk Management Agent"}
 
-@app.get("/test-auth")
-async def test_auth(current_user=Depends(get_current_user)):
-    return {
-        "message": "Authentication successful",
-        "user": {
-            "username": current_user.get("username"),
-            "organization_name": current_user.get("organization_name"),
-            "location": current_user.get("location"),
-            "domain": current_user.get("domain")
-        }
-    }
-
-@app.get("/test-no-auth")
-async def test_no_auth():
-    return {"message": "No authentication required"}
-
-@app.post("/greeting", response_model=GreetingResponse)
-async def get_greeting_endpoint(request: GreetingRequest, current_user=Depends(get_current_user)):
-    # Return the static greeting message
-    return GreetingResponse(greeting=GREETING_MESSAGE)
-
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, current_user=Depends(get_current_user)):
     # Extract user data from current_user
@@ -104,20 +79,12 @@ async def chat(request: ChatRequest, current_user=Depends(get_current_user)):
         user_data
     )
     
-    # Note: User preferences are now managed through risk profiles
-    # Risk profile updates are handled separately through the risk profile system
-    
     return ChatResponse(
         response=response, 
         conversation_history=updated_history,
         risk_context=updated_risk_context
     )
 
-@app.post("/risk-summary", response_model=RiskSummaryResponse)
-async def get_risk_summary(request: RiskSummaryRequest, current_user=Depends(get_current_user)):
-    """Generate a summary of the risk assessment session"""
-    summary = get_risk_assessment_summary(request.conversation_history, request.risk_context)
-    return RiskSummaryResponse(summary=summary)
 
 @app.get("/risk-summary/finalized", response_model=RiskSummaryResponse)
 async def get_finalized_risks_summary_endpoint(current_user=Depends(get_current_user)):
@@ -169,12 +136,6 @@ async def save_risks(request: SaveRisksRequest, current_user=Depends(get_current
     
     return result
 
-@app.get("/risks/user", response_model=RiskResponse)
-async def get_user_risks(current_user=Depends(get_current_user)):
-    """Get all risks for the current user"""
-    user_id = current_user.get("username", "")
-    result = await RiskDatabaseService.get_user_risks(user_id)
-    return result
 @app.get("/user/preferences")
 async def get_user_preferences(current_user=Depends(get_current_user)):
     """Return the user's risk profile preferences including likelihood and impact scales"""
@@ -218,125 +179,6 @@ async def update_risk_selection(
     result = await RiskDatabaseService.update_risk_selection(user_id, risk_index, selection.is_selected)
     return result
 
-@app.get("/risk-categories")
-async def get_risk_categories():
-    """Get available risk categories for reference"""
-    return {
-        "risk_categories": [
-            {
-                "category": "Competition",
-                "description": "Risks related to competitive pressures and market competition",
-                "examples": ["New market entrants", "Price wars", "Product obsolescence", "Market share loss"]
-            },
-            {
-                "category": "External",
-                "description": "Risks arising from external factors beyond organizational control",
-                "examples": ["Economic downturns", "Political changes", "Natural disasters", "Supply chain disruptions"]
-            },
-            {
-                "category": "Financial",
-                "description": "Risks related to financial performance and stability",
-                "examples": ["Market volatility", "Credit risk", "Liquidity risk", "Currency fluctuations"]
-            },
-            {
-                "category": "Innovation",
-                "description": "Risks associated with innovation and technological advancement",
-                "examples": ["R&D failures", "Technology adoption", "Innovation disruption", "Patent issues"]
-            },
-            {
-                "category": "Internal",
-                "description": "Risks arising from internal organizational factors",
-                "examples": ["Employee turnover", "Management changes", "Internal conflicts", "Resource constraints"]
-            },
-            {
-                "category": "Legal and Compliance",
-                "description": "Risks of non-compliance with laws, regulations, and standards",
-                "examples": ["Regulatory violations", "Data protection breaches", "Industry standards", "Contractual obligations"]
-            },
-            {
-                "category": "Operational",
-                "description": "Risks arising from internal processes, people, and systems",
-                "examples": ["Process failures", "Human error", "System breakdowns", "Equipment malfunctions"]
-            },
-            {
-                "category": "Project Management",
-                "description": "Risks related to project execution and delivery",
-                "examples": ["Scope creep", "Timeline delays", "Budget overruns", "Resource allocation"]
-            },
-            {
-                "category": "Reputational",
-                "description": "Risks to the organization's reputation and brand",
-                "examples": ["Negative publicity", "Social media crises", "Stakeholder concerns", "Brand damage"]
-            },
-            {
-                "category": "Safety",
-                "description": "Risks related to workplace safety and health",
-                "examples": ["Workplace accidents", "Health hazards", "Safety violations", "Emergency situations"]
-            },
-            {
-                "category": "Strategic",
-                "description": "Risks affecting the organization's ability to achieve its objectives",
-                "examples": ["Strategic misalignment", "Market changes", "Business model disruption", "Merger integration"]
-            },
-            {
-                "category": "Technology",
-                "description": "Risks related to information technology and digital systems",
-                "examples": ["Data breaches", "System failures", "Technology obsolescence", "Cybersecurity threats"]
-            }
-        ]
-    }
-
-@app.get("/compliance-frameworks")
-async def get_compliance_frameworks():
-    """Get common compliance frameworks and regulations"""
-    return {
-        "compliance_frameworks": [
-            {
-                "name": "SOX (Sarbanes-Oxley Act)",
-                "description": "Financial reporting and corporate governance regulations",
-                "applicable_to": ["Public companies", "Financial institutions"]
-            },
-            {
-                "name": "GDPR (General Data Protection Regulation)",
-                "description": "Data protection and privacy regulations for EU citizens",
-                "applicable_to": ["Organizations handling EU data", "Global companies"]
-            },
-            {
-                "name": "HIPAA (Health Insurance Portability and Accountability Act)",
-                "description": "Healthcare data protection and privacy regulations",
-                "applicable_to": ["Healthcare providers", "Health insurers", "Business associates"]
-            },
-            {
-                "name": "PCI-DSS (Payment Card Industry Data Security Standard)",
-                "description": "Security standards for payment card data",
-                "applicable_to": ["Merchants", "Payment processors", "Financial institutions"]
-            },
-            {
-                "name": "ISO 27001",
-                "description": "Information security management system standard",
-                "applicable_to": ["All organizations", "IT service providers"]
-            },
-            {
-                "name": "SOC 2",
-                "description": "Service Organization Control 2 for security, availability, and confidentiality",
-                "applicable_to": ["Cloud service providers", "SaaS companies"]
-            }
-        ]
-    }
-
-@app.get("/admin/risks/all")
-async def get_all_risks_with_users():
-    """Admin endpoint to get all generated risks with user information"""
-    try:
-        result = await RiskDatabaseService.get_all_risks_with_users()
-        return result
-    except Exception as e:
-        return RiskResponse(
-            success=False,
-            message=f"Error retrieving all risks: {str(e)}",
-            data=None
-        )
-
 @app.post("/risks/finalize", response_model=FinalizedRisksResponse)
 async def finalize_risks(request: FinalizeRisksRequest, current_user=Depends(get_current_user)):
     """Finalize selected risks by saving them to finalized_risks collection"""
@@ -376,12 +218,6 @@ async def get_finalized_risks(current_user=Depends(get_current_user)):
             data=None
         )
 
-@app.delete("/risks/finalized/{risk_id}", response_model=FinalizedRisksResponse)
-async def delete_finalized_risk(risk_id: str, current_user=Depends(get_current_user)):
-    """Delete a specific finalized risk by ID"""
-    user_id = current_user.get("username", "")
-    result = await RiskDatabaseService.delete_finalized_risk(user_id, risk_id)
-    return result
 
 @app.delete("/risks/finalized/index/{risk_index}", response_model=FinalizedRisksResponse)
 async def delete_finalized_risk_by_index(risk_index: int, current_user=Depends(get_current_user)):
@@ -391,30 +227,6 @@ async def delete_finalized_risk_by_index(risk_index: int, current_user=Depends(g
     return result
 
 
-@app.get("/user/risk-profiles")
-async def get_user_risk_profiles(current_user=Depends(get_current_user)):
-    """Get user's risk profiles"""
-    try:
-        user_id = current_user.get("username", "")
-        result = RiskProfileDatabaseService.get_user_risk_profiles(user_id)
-        
-        if result.success:
-            return {
-                "success": True,
-                "profiles": result.data.get("profiles", [])
-            }
-        else:
-            return {
-                "success": False,
-                "message": result.message,
-                "profiles": []
-            }
-    except Exception as e:
-        return {
-            "success": False,
-            "message": f"Error retrieving risk profiles: {str(e)}",
-            "profiles": []
-        }
 
 @app.get("/user/risk-profiles/table")
 async def get_user_risk_profiles_table(current_user=Depends(get_current_user)):
