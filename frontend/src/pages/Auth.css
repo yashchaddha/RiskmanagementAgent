@@ -4,7 +4,10 @@
   align-items: center;
   justify-content: center;
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  /* Updated background */
+  background: radial-gradient(600px at 20% 20%, rgba(99,102,241,0.35), transparent 50%),
+              radial-gradient(600px at 80% 0%, rgba(139,92,246,0.35), transparent 50%),
+              linear-gradient(135deg, #0f172a 0%, #111827 100%);
   padding: 20px;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }

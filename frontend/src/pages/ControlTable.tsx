@@ -51,9 +51,10 @@ interface ControlTableProps {
 export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize, onClose, title = "🔐 ISO 27001 Controls Selection" }) => {
   const [rows, setRows] = useState<Control[]>([]);
   const [selectAll, setSelectAll] = useState(false);
-  const [priorityFilter, setPriorityFilter] = useState<string>("All");
+  // Priority filter removed per requirements
   const [selectedControlForDetails, setSelectedControlForDetails] = useState<Control | null>(null);
   const [showDetailModal, setShowDetailModal] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     const withSelection = (controls || []).map((c) => {
@@ -74,10 +75,7 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
     setRows(withSelection);
   }, [controls]);
 
-  const filteredRows = useMemo(() => {
-    if (priorityFilter === "All") return rows;
-    return rows.filter((row) => row.priority === priorityFilter);
-  }, [rows, priorityFilter]);
+  const filteredRows = useMemo(() => rows, [rows]);
 
   const totalSelected = useMemo(() => rows.filter((r) => r.isSelected).length, [rows]);
 
@@ -96,9 +94,17 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
     setSelectAll(allSelected);
   };
 
-  const finalize = () => {
+  const finalize = async () => {
     const selection = rows.filter((r) => r.isSelected);
-    onFinalize(selection);
+    setIsSaving(true);
+    try {
+      const ret = (onFinalize as any)(selection);
+      if (ret && typeof ret.then === 'function') {
+        await ret;
+      }
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const showControlDetails = (control: Control) => {
@@ -156,22 +162,10 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
             </label>
             <span className="control-count">
               {filteredRows.length} control{filteredRows.length !== 1 ? "s" : ""}
-              {priorityFilter !== "All" && ` (${priorityFilter} priority)`}
             </span>
           </div>
 
-          <div className="control-filters">
-            <div className="priority-filter">
-              <label>Filter by Priority:</label>
-              <select value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)}>
-                <option value="All">All</option>
-                <option value="Critical">Critical</option>
-                <option value="High">High</option>
-                <option value="Medium">Medium</option>
-                <option value="Low">Low</option>
-              </select>
-            </div>
-          </div>
+          <div className="control-filters"></div>
         </div>
 
         <div className="control-table-container">
@@ -182,11 +176,10 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
                 <th className="control-title-cell">Control Details</th>
                 <th className="control-objective-cell">Business Objective</th>
                 <th className="control-annex-cell">ISO Mappings</th>
-                <th className="control-priority-cell">Priority</th>
                 <th className="control-status-cell">Status</th>
                 <th className="control-owner-cell">Owner/Role</th>
                 <th className="control-frequency-cell">Review Frequency</th>
-                <th className="control-evidence-cell">Evidence/Policy</th>
+                <th className="control-evidence-cell">Evidence Required</th>
               </tr>
             </thead>
             <tbody>
@@ -238,15 +231,6 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
                     )}
                   </td>
 
-                  <td className="control-priority-cell">
-                    <select className="control-priority-select" value={control.priority || "Medium"} onChange={(e) => updateField(control.id, "priority", e.target.value)}>
-                      <option value="Low">Low</option>
-                      <option value="Medium">Medium</option>
-                      <option value="High">High</option>
-                      <option value="Critical">Critical</option>
-                    </select>
-                  </td>
-
                   <td className="control-status-cell">
                     <select className="control-status-select" value={control.status || "Planned"} onChange={(e) => updateField(control.id, "status", e.target.value)}>
                       <option value="Planned">Planned</option>
@@ -265,14 +249,17 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
                   </td>
 
                   <td className="control-evidence-cell">
-                    <div className="evidence-section">
-                      <input className="control-evidence-input" value={control.evidence || ""} onChange={(e) => updateField(control.id, "evidence", e.target.value)} placeholder="Documentation link" />
-                      {control.policy_ref && (
-                        <div className="policy-ref">
-                          <small>Policy: {control.policy_ref}</small>
-                        </div>
-                      )}
-                    </div>
+                    {control.evidence_samples && control.evidence_samples.length > 0 ? (
+                      <ul className="evidence-list">
+                        {control.evidence_samples.map((ev, idx) => (
+                          <li key={idx}>{ev}</li>
+                        ))}
+                      </ul>
+                    ) : control.evidence ? (
+                      <div className="evidence-text">{control.evidence}</div>
+                    ) : (
+                      <div className="evidence-text">Not specified</div>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -287,9 +274,9 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
             </div>
           </div>
           <div className="control-footer-right">
-            <button className="control-save-btn" onClick={finalize} disabled={totalSelected === 0}>
-              <span>💾</span>
-              Save {totalSelected} Control{totalSelected !== 1 ? "s" : ""}
+            <button className="control-save-btn" onClick={finalize} disabled={totalSelected === 0 || isSaving}>
+              <span>{isSaving ? '⏳' : '💾'}</span>
+              {isSaving ? 'Saving…' : `Save ${totalSelected} Control${totalSelected !== 1 ? 's' : ''}`}
             </button>
             <button className="control-cancel-btn" onClick={onClose}>
               Cancel
@@ -330,7 +317,7 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
                   {selectedControlForDetails.rationale && (
                     <div className="detail-item">
                       <strong>💡 Rationale:</strong>
-                      <p>{selectedControlForDetails.rationale}</p>
+                      <p className="control-rationale-text">{selectedControlForDetails.rationale}</p>
                     </div>
                   )}
 

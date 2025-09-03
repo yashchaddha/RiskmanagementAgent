@@ -45,6 +45,7 @@ export const RiskTable: React.FC<RiskTableProps> = ({ risks, onRiskSelectionChan
   });
 
   const [editedRisks, setEditedRisks] = useState<{ [key: string]: Risk }>({});
+  const [isFinalizing, setIsFinalizing] = useState(false);
 
   // Load user preferences on component mount
   useEffect(() => {
@@ -125,7 +126,7 @@ export const RiskTable: React.FC<RiskTableProps> = ({ risks, onRiskSelectionChan
 
       const backendField = fieldMapping[field] || field;
 
-              const response = await fetch(`http://localhost:8000/risks/${riskIndex}/update`, {
+      const response = await fetch(`http://localhost:8000/risks/${riskIndex}/update`, {
         method: "PUT",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -319,31 +320,46 @@ export const RiskTable: React.FC<RiskTableProps> = ({ risks, onRiskSelectionChan
         </div>
 
         <div className="risk-table-footer">
-          <button
-            className="finalize-btn"
-            onClick={() => {
-              // Use edited risks instead of original risks
-              const selectedEditedRisks = risks
-                .map((risk) => {
-                  const editedRisk = editedRisks[risk.id];
-                  return editedRisk || risk;
-                })
-                .filter((r) => r.isSelected);
+          <div></div>
+          <div>
+            <div style={{ display: "flex", gap: "12px" }}>
+              <button
+                className="finalize-btn"
+                onClick={async () => {
+                  const selectedEditedRisks = risks
+                    .map((risk) => {
+                      const editedRisk = editedRisks[risk.id];
+                      return editedRisk || risk;
+                    })
+                    .filter((r) => r.isSelected);
 
-              console.log("Edited risks being finalized:", selectedEditedRisks); // Debug log
-              console.log("Original risks:", risks); // Debug log
-              console.log("Edited risks state:", editedRisks); // Debug log
-
-              onFinalize(selectedEditedRisks);
-            }}
-            disabled={risks.filter((r) => r.isSelected).length === 0}
-          >
-            ✅ Finalise Risks
-          </button>
-          <button className="close-table-btn" onClick={onClose}>
-            Close
-          </button>
+                  setIsFinalizing(true);
+                  try {
+                    const ret = (onFinalize as any)(selectedEditedRisks);
+                    if (ret && typeof ret.then === "function") {
+                      await ret;
+                    }
+                  } finally {
+                    setIsFinalizing(false);
+                  }
+                }}
+                disabled={risks.filter((r) => r.isSelected).length === 0 || isFinalizing}
+              >
+                {isFinalizing ? "⏳ Finalising…" : "✅ Finalise Risks"}
+              </button>
+              <button className="close-table-btn" onClick={onClose}>
+                Close
+              </button>
+            </div>
+          </div>
         </div>
+
+        {isFinalizing && (
+          <div className="risk-table-loading-overlay">
+            <div className="risk-table-spinner"></div>
+            <div>Finalising risks…</div>
+          </div>
+        )}
       </div>
     </div>
   );

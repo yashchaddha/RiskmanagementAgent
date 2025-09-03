@@ -87,6 +87,26 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
+  // Typing animation for bot responses
+  const animateBotMessage = (fullText: string) => {
+    const id = (Date.now() + Math.random()).toString();
+    const newMsg: Message = { id, text: "", sender: "bot", timestamp: new Date() };
+    setMessages((prev) => [...prev, newMsg]);
+
+    let i = 0;
+    const total = fullText.length;
+    // Adaptive step based on message size for reasonable speed
+    const step = Math.max(1, Math.round(total / 200));
+    const interval = setInterval(() => {
+      i = Math.min(i + step, total);
+      const slice = fullText.slice(0, i);
+      setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, text: slice } : m)));
+      if (i >= total) {
+        clearInterval(interval);
+      }
+    }, 15);
+  };
+
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
@@ -100,7 +120,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
     // Use static greeting message
     const greetingMessage: Message = {
       id: Date.now().toString(),
-      text: "Welcome to the Risk Management Agent! I'm here to help your organization with comprehensive risk assessment, compliance management, and risk mitigation strategies.\n\nI can assist you with identifying operational, financial, strategic, and compliance risks, as well as provide guidance on industry regulations and best practices.\n\nWhat specific risk management challenges or compliance requirements would you like to discuss today?",
+      text: "Welcome to NexiAgent! I'm here to help your organization with comprehensive risk assessment, compliance management, and risk mitigation strategies.\n\nI can assist you with identifying operational, financial, strategic, and compliance risks, as well as provide guidance on industry regulations and best practices.\n\nWhat specific risk management challenges or compliance requirements would you like to discuss today?",
       sender: "bot",
       timestamp: new Date(),
     };
@@ -126,13 +146,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       const matrixSize = extractMatrixSize(inputMessage);
       const response = await applyMatrixRecommendation(matrixSize);
 
-      const botMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        text: response,
-        sender: "bot",
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, botMessage]);
+      animateBotMessage(response);
       setIsLoading(false);
       return;
     }
@@ -142,13 +156,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       const matrixSize = extractMatrixSize(inputMessage);
       const response = await createMatrixRecommendation(matrixSize);
 
-      const botMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        text: response,
-        sender: "bot",
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, botMessage]);
+      animateBotMessage(response);
       setIsLoading(false);
       return;
     }
@@ -218,14 +226,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
         }
 
         // Create bot message with formatted response
-        const botMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          text: formattedResponse,
-          sender: "bot",
-          timestamp: new Date(),
-        };
-
-        setMessages((prev) => [...prev, botMessage]);
+        animateBotMessage(formattedResponse);
         setConversationHistory(data.conversation_history);
         setRiskContext(data.risk_context);
       } else {
@@ -930,8 +931,8 @@ Please try again or contact support if the issue persists.`,
     <div className="chatbot-container">
       <div className="chatbot-header">
         <div className="header-content">
-          <h2>🛡️ Risk Management Agent</h2>
-          <p className="header-subtitle">AI-powered risk assessment & compliance management</p>
+          <h2>🛡️ NexiAgent</h2>
+          <p className="header-subtitle">AI-powered risk & compliance assistant</p>
         </div>
         <div className="header-actions">
           <button onClick={generateRiskSummary} disabled={isGeneratingSummary} className="summary-btn" title="Generate comprehensive risk assessment summary based on your finalized risks">
@@ -1002,7 +1003,8 @@ Please try again or contact support if the issue persists.`,
         {isLoading && (
           <div className="message bot-message">
             <div className="message-content">
-              <div className="typing-indicator">
+              <p><strong>NexiAgent is thinking…</strong></p>
+              <div className="typing-indicator" aria-label="NexiAgent is typing">
                 <span></span>
                 <span></span>
                 <span></span>

@@ -3,7 +3,7 @@
   flex-direction: column;
   height: 100vh;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   color-scheme: light !important;
 }
 
@@ -27,7 +27,7 @@
 
 .header-subtitle {
   margin: 0.2rem 0 0 0;
-  color: #7f8c8d;
+  color: #6b7280; /* gray-500 */
   font-size: 0.9rem;
   font-weight: 400;
 }
@@ -186,7 +186,7 @@
 
 .summary-body pre {
   white-space: pre-wrap;
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   line-height: 1.6;
   color: #2c3e50;
   margin: 0;
@@ -312,7 +312,9 @@
 }
 
 @keyframes typing {
-  0%, 80%, 100% {
+  0%,
+  80%,
+  100% {
     transform: scale(0.8);
     opacity: 0.5;
   }
@@ -477,4 +479,4 @@
 
 .chat-messages::-webkit-scrollbar-thumb:hover {
   background: #a8a8a8;
-} 
+}

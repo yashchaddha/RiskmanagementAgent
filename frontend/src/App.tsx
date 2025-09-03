@@ -7,8 +7,8 @@ function App() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem("token"));
 
   useEffect(() => {
-    // Update document title for the Risk Management Agent
-    document.title = "Risk Management Agent - AI-Powered Risk Assessment";
+    // Update document title for NexiAgent
+    document.title = "NexiAgent - AI-Powered Risk & Compliance";
   }, []);
 
   const handleAuthSuccess = (jwt: string) => {

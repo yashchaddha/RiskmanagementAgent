@@ -25,20 +25,18 @@ export const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
     try {
       const url = isSignup ? `${API_URL}/auth/signup` : `${API_URL}/auth/login`;
       const body = isSignup
-        ? { 
-            username, 
-            password, 
+        ? {
+            username,
+            password,
             organization_name: organizationName,
             location,
             domain,
-            risks_applicable: risksApplicable
+            risks_applicable: risksApplicable,
           }
         : new URLSearchParams({ username, password });
       const res = await fetch(url, {
         method: "POST",
-        headers: isSignup
-          ? { "Content-Type": "application/json" }
-          : { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: isSignup ? { "Content-Type": "application/json" } : { "Content-Type": "application/x-www-form-urlencoded" },
         body: isSignup ? JSON.stringify(body) : body.toString(),
       });
       if (!res.ok) {
@@ -66,103 +64,42 @@ export const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
   };
 
   const toggleMode = () => {
-    setIsSignup(s => !s);
+    setIsSignup((s) => !s);
     clearForm();
   };
 
   return (
     <div className="auth-container">
       <div className="auth-header">
-        <h1>🛡️ Risk Management Agent</h1>
-        <p className="auth-subtitle">AI-Powered Risk Assessment & Compliance Management</p>
+        <h1>🛡️ NexiAgent</h1>
+        <p className="auth-subtitle">AI-powered risk & compliance assistant</p>
       </div>
-      
+
       <div className="auth-card">
         <h2>{isSignup ? "Create Account" : "Welcome Back"}</h2>
-        <p className="auth-description">
-          {isSignup 
-            ? "Join our platform to streamline your organization's risk management and compliance processes."
-            : "Access your organization's risk assessment dashboard and compliance tools."
-          }
-        </p>
-        
+        <p className="auth-description">{isSignup ? "Join our platform to streamline your organization's risk management and compliance processes." : "Access your organization's risk assessment dashboard and compliance tools."}</p>
+
         <form onSubmit={handleSubmit}>
-          <input
-            type="text"
-            placeholder="Username"
-            value={username}
-            onChange={e => setUsername(e.target.value)}
-            required
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={e => setPassword(e.target.value)}
-            required
-          />
+          <input type="text" placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value)} required />
+          <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required />
           {isSignup && (
             <>
-              <input
-                type="text"
-                placeholder="Organization Name"
-                value={organizationName}
-                onChange={e => setOrganizationName(e.target.value)}
-                required
-              />
-              <input
-                type="text"
-                placeholder="Location (City, Country)"
-                value={location}
-                onChange={e => setLocation(e.target.value)}
-                required
-              />
-              <input
-                type="text"
-                placeholder="Industry Domain (e.g., Finance, Healthcare, Technology)"
-                value={domain}
-                onChange={e => setDomain(e.target.value)}
-                required
-              />
+              <input type="text" placeholder="Organization Name" value={organizationName} onChange={(e) => setOrganizationName(e.target.value)} required />
+              <input type="text" placeholder="Location (City, Country)" value={location} onChange={(e) => setLocation(e.target.value)} required />
+              <input type="text" placeholder="Industry Domain (e.g., Finance, Healthcare, Technology)" value={domain} onChange={(e) => setDomain(e.target.value)} required />
             </>
           )}
           <button type="submit" disabled={loading}>
             {loading ? "Please wait..." : isSignup ? "Create Account" : "Sign In"}
           </button>
         </form>
-        
+
         <button onClick={toggleMode} className="toggle-btn">
           {isSignup ? "Already have an account? Sign In" : "Don't have an account? Create Account"}
         </button>
-        
+
         {error && <div className="error">{error}</div>}
-      </div>
-      
-      <div className="auth-features">
-        <h3>Why Choose Our Risk Management Agent?</h3>
-        <div className="features-grid">
-          <div className="feature">
-            <span className="feature-icon">🔍</span>
-            <h4>Comprehensive Risk Assessment</h4>
-            <p>Identify and analyze operational, financial, strategic, and compliance risks</p>
-          </div>
-          <div className="feature">
-            <span className="feature-icon">📋</span>
-            <h4>Compliance Management</h4>
-            <p>Stay compliant with industry regulations like SOX, GDPR, HIPAA, and more</p>
-          </div>
-          <div className="feature">
-            <span className="feature-icon">🤖</span>
-            <h4>AI-Powered Insights</h4>
-            <p>Get intelligent recommendations and risk mitigation strategies</p>
-          </div>
-          <div className="feature">
-            <span className="feature-icon">📊</span>
-            <h4>Real-time Reporting</h4>
-            <p>Generate comprehensive risk assessment reports and summaries</p>
-          </div>
-        </div>
       </div>
     </div>
   );
-}; 
+};
