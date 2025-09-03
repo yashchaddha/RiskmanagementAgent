@@ -5,6 +5,8 @@ import { RiskRegister } from "./RiskRegister";
 import { RiskProfileTable } from "./RiskProfileTable";
 import { MatrixPreviewModal } from "./MatrixPreviewModal";
 import { parseRisksFromLLMResponse } from "../utils/riskParser";
+import { ControlTable } from "./ControlTable";
+import type { Control, AnnexAMapping } from "./ControlTable";
 
 interface Message {
   id: string;
@@ -38,6 +40,24 @@ interface RiskContext {
   compliance_requirements?: string[];
 }
 
+interface RiskLevel {
+  level: number;
+  title: string;
+  description: string;
+}
+
+interface RiskProfile {
+  riskType: string;
+  definition: string;
+  likelihoodScale: RiskLevel[];
+  impactScale: RiskLevel[];
+  matrixSize: string;
+}
+
+interface EditableRiskProfile extends RiskProfile {
+  isEditing?: boolean;
+}
+
 interface ChatbotProps {
   onLogout: () => void;
 }
@@ -46,7 +66,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputMessage, setInputMessage] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [conversationHistory, setConversationHistory] = useState<any[]>([]);
+  const [conversationHistory, setConversationHistory] = useState<unknown[]>([]);
   const [riskContext, setRiskContext] = useState<RiskContext>({});
   const [showRiskSummary, setShowRiskSummary] = useState(false);
   const [riskSummary, setRiskSummary] = useState("");
@@ -55,10 +75,14 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const [showRiskRegister, setShowRiskRegister] = useState(false);
   const [showRiskProfileTable, setShowRiskProfileTable] = useState(false);
   const [showMatrixPreviewModal, setShowMatrixPreviewModal] = useState(false);
-  const [matrixPreviewData, setMatrixPreviewData] = useState<any>(null);
+  const [matrixPreviewData, setMatrixPreviewData] = useState<{
+    matrix_size: string;
+    profiles: RiskProfile[];
+  } | null>(null);
   const [generatedRisks, setGeneratedRisks] = useState<Risk[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-
+  const [showControlTable, setShowControlTable] = useState(false);
+  const [generatedControls, setGeneratedControls] = useState<Control[]>([]);
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -181,8 +205,17 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       if (response.ok) {
         const data = await response.json();
 
-        // Check if this response contains generated risks and format it
-        const formattedResponse = await checkForRiskGeneration(data.response);
+        // First check if controls were generated in risk_context
+        let formattedResponse = data.response;
+        if (data.risk_context && data.risk_context.generated_controls) {
+          const generatedControls = data.risk_context.generated_controls;
+          setGeneratedControls(generatedControls);
+          setShowControlTable(true);
+          formattedResponse = formatControlsForChat(generatedControls);
+        } else {
+          // Check if this response contains generated risks and format it
+          formattedResponse = await checkForRiskGeneration(data.response);
+        }
 
         // Create bot message with formatted response
         const botMessage: Message = {
@@ -226,6 +259,102 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const tryParseControls = (payload: unknown): Control[] => {
+    try {
+      if (!payload) return [];
+      if (Array.isArray(payload)) return payload as Control[];
+      const text = typeof payload === "string" ? payload : JSON.stringify(payload);
+      // naive JSON array detection
+      const match = text.match(/\[\s*{[\s\S]*}\s*\]/);
+      if (!match) return [];
+      const arr = JSON.parse(match[0]);
+      return (arr || []).map((c: Record<string, unknown>, i: number) => ({
+        // Handle both new comprehensive format and legacy format
+        id: c.id || c.control_id || c.uuid || String(i + 1),
+
+        // New comprehensive format fields
+        control_id: c.control_id as string,
+        control_title: c.control_title as string,
+        control_description: c.control_description as string,
+        objective: c.objective as string,
+        annexA_map: Array.isArray(c.annexA_map) ? (c.annexA_map as AnnexAMapping[]) : undefined,
+        linked_risk_ids: Array.isArray(c.linked_risk_ids) ? (c.linked_risk_ids as string[]) : undefined,
+        owner_role: c.owner_role as string,
+        process_steps: Array.isArray(c.process_steps) ? (c.process_steps as string[]) : undefined,
+        evidence_samples: Array.isArray(c.evidence_samples) ? (c.evidence_samples as string[]) : undefined,
+        metrics: Array.isArray(c.metrics) ? (c.metrics as string[]) : undefined,
+        policy_ref: c.policy_ref as string,
+        rationale: c.rationale as string,
+        assumptions: c.assumptions as string,
+
+        // Legacy format fields (fallback)
+        risk_id: c.risk_id as string,
+        title: c.title || c.control_title || c.name || c.description || `Control ${i + 1}`,
+        description: c.description || c.control_description || "",
+        annex_reference: c.annex_reference || c.annex || "",
+        priority: c.priority || "Medium",
+        status: c.status || "Planned",
+        owner: c.owner || c.owner_role || "",
+        frequency: c.frequency || "",
+        evidence: c.evidence || "",
+        isSelected: false,
+      }));
+    } catch {
+      return [];
+    }
+  };
+
+  const finalizeControls = async (selected: Control[]) => {
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch("http://localhost:8000/controls/save", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: token ? `Bearer ${token}` : "",
+        },
+        body: JSON.stringify({ controls: selected }),
+      });
+
+      if (res.ok) {
+        await res.json();
+        // Add success message to chat
+        const successMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          text: `✅ **Controls Saved Successfully!**\n\n${selected.length} control(s) have been saved to your control database.\n\nYou can now implement these controls as part of your risk mitigation strategy.`,
+          sender: "bot",
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, successMessage]);
+        setShowControlTable(false);
+        setGeneratedControls([]);
+      } else {
+        const errorData = await res.json().catch(() => ({}));
+        console.error("Failed to save controls:", errorData);
+
+        // Add error message to chat
+        const errorMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          text: `❌ **Error Saving Controls**\n\nFailed to save the selected controls. Please try again.`,
+          sender: "bot",
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, errorMessage]);
+      }
+    } catch (error) {
+      console.error("Error saving controls:", error);
+
+      // Add error message to chat
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        text: `❌ **Error Saving Controls**\n\nAn error occurred while saving the controls. Please try again.`,
+        sender: "bot",
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, errorMessage]);
     }
   };
 
@@ -460,18 +589,17 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
           console.log("Matrix data generated by agent:", data.risk_context.generated_matrix);
 
           // Transform agent's matrix data to match the expected format for the modal
-          const matrixData = data.risk_context.generated_matrix;
+          const matrixData = data.risk_context.generated_matrix as { risk_categories?: Array<Record<string, unknown>> };
           const formattedMatrixData = {
             matrix_size: matrixSize,
             profiles:
-              matrixData.risk_categories?.map((category: any) => ({
-                riskType: category.riskType,
-                definition: category.definition,
-                likelihoodScale: category.likelihoodScale || [],
-                impactScale: category.impactScale || [],
+              matrixData.risk_categories?.map((category: Record<string, unknown>) => ({
+                riskType: String(category.riskType || ""),
+                definition: String(category.definition || ""),
+                likelihoodScale: (Array.isArray(category.likelihoodScale) ? category.likelihoodScale : []) as RiskLevel[],
+                impactScale: (Array.isArray(category.impactScale) ? category.impactScale : []) as RiskLevel[],
                 matrixSize: matrixSize,
               })) || [],
-            totalProfiles: matrixData.risk_categories?.length || 0,
           };
 
           setMatrixPreviewData(formattedMatrixData);
@@ -563,7 +691,7 @@ You can continue using the risk profile dashboard to further customize the scale
     }
   };
 
-  const handleApplyMatrix = async (matrixSize: string, updatedProfiles?: any[]) => {
+  const handleApplyMatrix = async (matrixSize: string, updatedProfiles?: EditableRiskProfile[]) => {
     try {
       const token = localStorage.getItem("token");
 
@@ -634,7 +762,87 @@ Please try again or contact support if the issue persists.`,
     return riskRegisterIndicators.some((indicator) => message.toLowerCase().includes(indicator.toLowerCase()));
   };
 
+  const checkForControlGeneration = (response: string) => {
+    // Check if the response contains control-related keywords and structure
+    const controlIndicators = ["controls", "control measures", "security controls", "recommended controls", "control implementation", "control framework", "ISO 27001", "NIST", "annex"];
+
+    const hasControlKeywords = controlIndicators.some((indicator) => response.toLowerCase().includes(indicator.toLowerCase()));
+
+    // Check for JSON-like structure with control properties
+    const hasControlStructure = response.includes('"title"') || response.includes('"annex_reference"') || response.includes('"priority"') || response.includes('"status"');
+
+    if (hasControlKeywords || hasControlStructure) {
+      const controls = tryParseControls(response);
+      if (controls.length > 0) {
+        setGeneratedControls(controls);
+        setShowControlTable(true);
+        return formatControlsForChat(controls);
+      }
+    }
+    return response;
+  };
+
+  const formatControlsForChat = (controls: Control[]): string => {
+    let formattedResponse = "🔐 Generated ISO 27001 Security Controls\n\n";
+
+    controls.forEach((control, index) => {
+      const title = control.control_title || control.title || `Control ${index + 1}`;
+      const description = control.control_description || control.description || "";
+
+      formattedResponse += `${index + 1}. **${title}**\n`;
+
+      if (control.control_id) {
+        formattedResponse += `📋 ID: ${control.control_id}\n`;
+      }
+
+      if (control.objective) {
+        formattedResponse += `🎯 Objective: ${control.objective}\n`;
+      }
+
+      if (description) {
+        formattedResponse += `� Description: ${description}\n`;
+      }
+
+      if (control.annexA_map && control.annexA_map.length > 0) {
+        formattedResponse += `📚 ISO Mappings: ${control.annexA_map.map((a) => `${a.id} (${a.title})`).join(", ")}\n`;
+      } else if (control.annex_reference) {
+        formattedResponse += `� ISO Reference: ${control.annex_reference}\n`;
+      }
+
+      if (control.owner_role) {
+        formattedResponse += `👤 Owner Role: ${control.owner_role}\n`;
+      }
+
+      formattedResponse += `⚡ Priority: ${control.priority || "Medium"}\n`;
+      formattedResponse += `📊 Status: ${control.status || "Planned"}\n`;
+
+      if (control.process_steps && control.process_steps.length > 0) {
+        formattedResponse += `📋 Key Process Steps: ${control.process_steps.slice(0, 2).join(" → ")}\n`;
+      }
+
+      if (control.metrics && control.metrics.length > 0) {
+        formattedResponse += `📈 Success Metrics: ${control.metrics.slice(0, 2).join(", ")}\n`;
+      }
+
+      formattedResponse += `\n---\n\n`;
+    });
+
+    formattedResponse += "💡 **Next Steps:** Review these comprehensive controls in the detailed table where you can:\n";
+    formattedResponse += "• View complete implementation process steps\n";
+    formattedResponse += "• See evidence samples and audit requirements\n";
+    formattedResponse += "• Review ISO 27001 Annex A mappings\n";
+    formattedResponse += "• Select controls for implementation in your organization\n";
+
+    return formattedResponse;
+  };
+
   const checkForRiskGeneration = async (response: string) => {
+    // First check for controls
+    const controlResponse = checkForControlGeneration(response);
+    if (controlResponse !== response) {
+      return controlResponse; // Controls were found and formatted
+    }
+
     // Check if the response contains generated risks (JSON format or text format)
     const hasJsonRisks = response.includes('"risks"') && response.includes('"description"');
 
@@ -756,6 +964,8 @@ Please try again or contact support if the issue persists.`,
       {showRiskRegister && <RiskRegister onClose={() => setShowRiskRegister(false)} />}
 
       {showRiskProfileTable && <RiskProfileTable onClose={() => setShowRiskProfileTable(false)} />}
+
+      {showControlTable && <ControlTable controls={generatedControls} onFinalize={finalizeControls} onClose={() => setShowControlTable(false)} title="Proposed Controls" />}
 
       {showMatrixPreviewModal && (
         <MatrixPreviewModal

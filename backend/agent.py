@@ -1,4 +1,7 @@
 import os
+import json
+import traceback
+from datetime import datetime
 from dotenv import load_dotenv
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
@@ -11,9 +14,11 @@ from rag_tools import semantic_risk_search
 from typing_extensions import TypedDict
 from typing import List, Dict, Any
 from dependencies import get_llm
-import json
 from knowledge_base import ISO_27001_KNOWLEDGE
 from langsmith import traceable
+from openai_service import openai_service
+import uuid
+from database import ControlsDatabaseService
 
 # Load environment variables from .env
 load_dotenv()
@@ -128,8 +133,656 @@ class LLMState(TypedDict):
     matrix_recommendation_requested: bool  # Flag to indicate if matrix recommendation is needed
     is_audit_related: bool  # Flag to indicate if query is audit-related
     is_risk_related: bool  # Flag to indicate if query is risk-related
+    is_control_related: bool
+    is_knowledge_related: bool
+    control_generation_requested: bool
+    control_parameters: dict
+    control_retrieved_context: dict
+    generated_controls: list
+    selected_controls: list
+    pending_selection: bool
+    control_session_id: str
 
-# 2. Define the risk node
+    # New control-routing helpers
+    control_target: str  # one of: generate_control_node | control_library_node | control_knowledge_node
+    control_query: str
+    control_filters: dict
+    risk_description: str
+
+# 2. Define the control node
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="control_node")
+def control_node(state: LLMState) -> LLMState:
+    """
+    Control intent router using direct LLM calls with conversation history
+    """
+    print("Control Node Activated")
+    try:
+        # Early-routing: lightweight heuristics to new control sub-nodes
+        user_input = (state.get("input") or "").strip()
+        ql = user_input.lower()
+        state["is_control_related"] = True
+        state["control_target"] = state.get("control_target") or ""
+        state["control_parameters"] = state.get("control_parameters") or {}
+        state["control_filters"] = state.get("control_filters") or {}
+        state["control_query"] = state.get("control_query") or user_input
+        state["risk_description"] = state.get("risk_description") or ""
+
+        # Decide if we handle routing here and return immediately
+        routed = False
+        if ("generate" in ql and "control" in ql) or ("create" in ql and "control" in ql):
+            state["control_target"] = "generate_control_node"
+            state["control_generation_requested"] = True
+            # Prefer category mapping first
+            cat = None
+            if any(w in ql for w in ["legal", "regulatory", "compliance", "privacy"]):
+                cat = "Legal and Compliance"
+            elif any(w in ql for w in ["cyber", "cybersecurity", "information security", "technology"]):
+                cat = "Technology"
+            elif "operational" in ql:
+                cat = "Operational"
+            elif "financial" in ql:
+                cat = "Financial"
+            elif "strategic" in ql:
+                cat = "Strategic"
+            elif any(w in ql for w in ["reputation", "reputational"]):
+                cat = "Reputational"
+            elif any(w in ql for w in ["safety", "health and safety"]):
+                cat = "Safety"
+            elif any(w in ql for w in ["environmental", "environment"]):
+                cat = "Environmental"
+            elif any(w in ql for w in ["project", "project management"]):
+                cat = "Project Management"
+            elif any(w in ql for w in ["innovation", "r&d"]):
+                cat = "Innovation"
+            elif any(w in ql for w in ["internal", "people", "talent", "hr"]):
+                cat = "Internal"
+            elif any(w in ql for w in ["competition", "competitor", "market share"]):
+                cat = "Competition"
+            elif any(w in ql for w in ["external", "climate", "geopolitics"]):
+                cat = "External"
+
+            if cat:
+                state["control_parameters"] = {"mode": "category", "risk_category": cat}
+            else:
+                # All risks
+                if any(p in ql for p in ["for all", "for all my risks", "for my risks", "all risks"]):
+                    state["control_parameters"] = {"mode": "all"}
+                else:
+                    import re
+                    # specific risk id
+                    m = re.search(r"risk\s+([A-Za-z0-9\-]{3,})", ql)
+                    # risk description after 'for risk'
+                    dm = re.search(r"generate\s+controls?\s+for\s+risk\s+(.+)$", ql)
+                    if dm:
+                        desc = dm.group(1).strip().strip('"').strip("'. ,")
+                        state["control_parameters"] = {"mode": "risk_description"}
+                        state["risk_description"] = desc
+                    elif m and ("id" in ql or "risk " in ql):
+                        state["control_parameters"] = {"mode": "risk_id", "risk_id": m.group(1)}
+                    else:
+                        state["control_parameters"] = {"mode": "all"}
+            routed = True
+        elif any(w in ql for w in ["show", "list", "find", "search", "status", "annex", "implemented", "planned", "in progress", "for risk", "by risk"]):
+            state["control_target"] = "control_library_node"
+            # Extract simple filters
+            if "implemented" in ql:
+                state["control_filters"]["status"] = "Implemented"
+            elif "in progress" in ql:
+                state["control_filters"]["status"] = "In Progress"
+            elif "planned" in ql:
+                state["control_filters"]["status"] = "Planned"
+            import re
+            am = re.search(r"a\.\d+(?:\.\d+)?", ql)
+            if am:
+                state["control_filters"]["annex"] = am.group(0).upper()
+            rm = re.search(r"risk\s+([A-Za-z0-9\-]{3,})", ql)
+            if rm:
+                state["control_filters"]["risk_id"] = rm.group(1)
+            if "cyber" in ql or "cybersecurity" in ql:
+                state["control_filters"]["category"] = "Technology"
+            routed = True
+        else:
+            # Knowledge-oriented
+            state["control_target"] = "control_library_node"
+
+        if routed:
+            return state
+
+        # Fallback to previous LLM routing (legacy)
+        conversation_history = state.get("conversation_history", [])
+        user_data = state.get("user_data", {})
+        
+        # Control intent classification prompt
+        system_prompt = """
+You are a Control Management Intent Classifier. Analyze the user's query and determine their intent for ISO 27001 control management.
+
+Your task is to classify the intent and extract relevant parameters. Return ONLY a JSON object with the following format:
+
+{
+  "intent": "one_of_the_allowed_intents",
+  "parameters": {
+    "risk_id": "string (if specific risk mentioned)",
+    "risk_category": "string (if category mentioned)",
+    "impact": "string (High/Medium/Low if mentioned)",
+    "annex": "string (if Annex A reference mentioned)"
+  }
+}
+
+ALLOWED INTENTS:
+- generate_controls_specific: Generate controls for a specific risk ID
+- generate_controls_all: Generate controls for all user risks
+- generate_controls_category: Generate controls for risks in specific category
+- generate_controls_impact: Generate controls for risks with specific impact level
+- show_risks: Show/list user's risks
+- show_risks_without_controls: Show risks that don't have controls yet
+- show_risks_by_category: Show risks filtered by category
+- show_risks_by_impact: Show risks filtered by impact level
+- show_finalized_controls: Show user's saved/finalized controls
+- show_controls_by_category: Show controls filtered by risk category
+- show_controls_by_annex: Show controls filtered by ISO Annex A reference
+- show_controls_by_status: Show controls filtered by implementation status
+- show_controls_by_risk: Show controls linked to specific risk
+- search_controls: Search controls by text query
+- update_control_status: Update the status of a specific control
+- query_controls: General control queries or information requests
+
+INTENT CLASSIFICATION RULES:
+1. "generate controls" + "for risk [ID]" → generate_controls_specific
+2. "generate controls" + ("for all" OR "for my risks" OR just "generate controls") → generate_controls_all  
+3. "generate controls" + category mention → generate_controls_category
+4. "generate controls" + impact level → generate_controls_impact
+5. "show/list risks" + "without controls" → show_risks_without_controls
+6. "show/list risks" + category → show_risks_by_category
+7. "show/list risks" + impact → show_risks_by_impact
+8. "show/list controls" + category → show_controls_by_category
+9. "show/list controls" + "A.x.x" or "Annex" → show_controls_by_annex
+10. "show/list controls" + status ("implemented", "planned", etc.) → show_controls_by_status
+11. "show/list controls" + "for risk" or risk ID → show_controls_by_risk
+12. "find/search controls" + search terms → search_controls
+13. "show/list controls" (general) → show_finalized_controls
+14. "show/list risks" (general) → show_risks
+15. Everything else → query_controls
+
+PARAMETER EXTRACTION:
+- risk_id: Extract if pattern "risk [alphanumeric-id]" found
+- risk_category: Extract categories like "Financial", "Operational", "Strategic", etc.
+- impact: Extract "High", "Medium", "Low" if mentioned with impact context
+- annex: Extract "A.5", "A.8.24" pattern if mentioned
+- status: Extract status like "Implemented", "Planned", "In Progress" if mentioned
+- search_query: Extract search terms for control searches
+
+EXAMPLES:
+User: "Generate controls for all my risks"
+{"intent": "generate_controls_all", "parameters": {}}
+
+User: "Show me risks without controls"  
+{"intent": "show_risks_without_controls", "parameters": {}}
+
+User: "Generate controls for financial risks"
+{"intent": "generate_controls_category", "parameters": {"risk_category": "Financial"}}
+
+User: "List controls from Annex A.5"
+{"intent": "show_controls_by_annex", "parameters": {"annex": "A.5"}}
+
+User: "Show implemented controls"
+{"intent": "show_controls_by_status", "parameters": {"status": "Implemented"}}
+
+User: "Find controls related to encryption"
+{"intent": "search_controls", "parameters": {"search_query": "encryption"}}
+
+User: "Show controls for risk R-001"
+{"intent": "show_controls_by_risk", "parameters": {"risk_id": "R-001"}}
+"""
+
+        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
+        
+        try:
+            # Parse JSON response
+            content = response_content.strip()
+            if content.startswith("```") and content.endswith("```"):
+                content = content.strip('`')
+            
+            # Extract JSON
+            start = content.find('{')
+            end = content.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                result = json.loads(content[start:end+1])
+            else:
+                result = {"intent": "query_controls", "parameters": {}}
+                
+        except json.JSONDecodeError:
+            result = {"intent": "query_controls", "parameters": {}}
+        
+        intent = result.get("intent", "query_controls")
+        params = result.get("parameters", {})
+        
+        print(f"DEBUG: Control node classified intent: {intent}")
+        print(f"DEBUG: Control node parameters: {params}")
+        
+        # Set control-related flags in state
+        state["is_control_related"] = True
+        state["control_parameters"] = {"_intent": intent, **(params or {})}
+        state["control_generation_requested"] = intent.startswith("generate_controls")
+        
+        print(f"DEBUG: control_generation_requested: {state['control_generation_requested']}")
+        
+        return state
+        
+    except Exception as e:
+        return {
+            "input": state["input"],
+            "output": f"Error processing control request: {str(e)}",
+            "conversation_history": state.get("conversation_history", []),
+            "risk_context": state.get("risk_context", {}),
+            "user_data": state.get("user_data", {}),
+            "is_control_related": True,
+            "control_parameters": {"_intent": "query_controls"},
+            "control_generation_requested": False
+        }
+
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="generate_control_node")
+def control_generate_node(state: LLMState) -> LLMState:
+    """
+    Generate controls using direct LLM calls with conversation history
+    """
+    print("Control Generate Node Activated")
+    
+    conversation_history = state.get("conversation_history", [])
+    user_data = state.get("user_data", {})
+    user_id = user_data.get("username") or user_data.get("user_id") or ""
+    params = state.get("control_parameters", {}) or {}
+    mode = params.get("mode", "all")
+
+    all_controls = []
+
+    try:
+        risks = []
+        from vector_index import VectorIndexService
+
+        if mode == "risk_id":
+            rid = params.get("risk_id", "")
+            if rid:
+                r = ControlsDatabaseService.get_risk_by_id(rid, user_id)
+                if r:
+                    risks = [r]
+        elif mode == "risk_description":
+            desc = (state.get("risk_description") or "").strip()
+            if desc:
+                sr = VectorIndexService.search(user_id=user_id, query=desc, top_k=1, filters={})
+                hits = sr.get("results", [])
+                if hits:
+                    h = hits[0]
+                    risk_text = h.get("risk_text", "")
+                    description = risk_text.split("Risk: ")[-1].split(". Likelihood:")[0] if "Risk: " in risk_text else risk_text
+                    risks = [{
+                        "id": h.get("risk_id"),
+                        "description": description,
+                        "category": h.get("category"),
+                        "likelihood": "Medium",
+                        "impact": "Medium",
+                        "treatment_strategy": "",
+                        "user_id": user_id
+                    }]
+                else:
+                    risks = [{
+                        "id": "",
+                        "description": desc,
+                        "category": "Technology",
+                        "likelihood": "Medium",
+                        "impact": "Medium",
+                        "treatment_strategy": "",
+                        "user_id": user_id
+                    }]
+        elif mode == "category":
+            target_cat = (params.get("risk_category") or "").strip()
+            sr = VectorIndexService.search(
+                user_id=user_id,
+                query=(target_cat + " risks mitigation") if target_cat else state.get("input", "relevant risks"),
+                top_k=50,
+                filters={},
+            )
+            hits = sr.get("results", [])
+            for h in hits:
+                hcat = str(h.get("category", ""))
+                if target_cat and hcat.lower() != target_cat.lower():
+                    continue
+                risk_text = h.get("risk_text", "")
+                description = risk_text.split("Risk: ")[-1].split(". Likelihood:")[0] if "Risk: " in risk_text else risk_text
+                risks.append({
+                    "id": h.get("risk_id"),
+                    "description": description,
+                    "category": hcat,
+                    "likelihood": "Medium",
+                    "impact": "Medium",
+                    "treatment_strategy": "",
+                    "user_id": user_id,
+                })
+            if not risks:
+                all_risks = ControlsDatabaseService.get_user_risks(user_id)
+                risks = [r for r in all_risks if str(r.get("category", "")).lower() == target_cat.lower()] if target_cat else all_risks
+        elif mode == "category":
+            target_cat = (params.get("risk_category") or "").strip()
+            # Try semantic search first
+            sr = VectorIndexService.search(
+                user_id=user_id,
+                query=(target_cat + " risks mitigation") if target_cat else state.get("input", "relevant risks"),
+                top_k=50,
+                filters={},
+            )
+            hits = sr.get("results", [])
+            for h in hits:
+                hcat = str(h.get("category", ""))
+                if target_cat and hcat.lower() != target_cat.lower():
+                    continue
+                risk_text = h.get("risk_text", "")
+                description = risk_text.split("Risk: ")[-1].split(". Likelihood:")[0] if "Risk: " in risk_text else risk_text
+                risks.append({
+                    "id": h.get("risk_id"),
+                    "description": description,
+                    "category": hcat,
+                    "likelihood": "Medium",
+                    "impact": "Medium",
+                    "treatment_strategy": "",
+                    "user_id": user_id,
+                })
+            if not risks:
+                all_risks = ControlsDatabaseService.get_user_risks(user_id)
+                risks = [r for r in all_risks if str(r.get("category", "")).lower() == target_cat.lower()] if target_cat else all_risks
+        else:
+            sr = VectorIndexService.search(user_id=user_id, query="all risks security controls mitigation", top_k=50, filters={})
+            hits = sr.get("results", [])
+            for h in hits:
+                risk_text = h.get("risk_text", "")
+                description = risk_text.split("Risk: ")[-1].split(". Likelihood:")[0] if "Risk: " in risk_text else risk_text
+                risks.append({
+                    "id": h.get("risk_id"),
+                    "description": description,
+                    "category": h.get("category"),
+                    "likelihood": "Medium",
+                    "impact": "Medium",
+                    "treatment_strategy": "",
+                    "user_id": user_id
+                })
+            if not risks:
+                risks = ControlsDatabaseService.get_user_risks(user_id)
+
+        print(f"DEBUG: control_generate_node - generating for {len(risks)} risk(s)")
+
+        for r in risks:
+            controls = generate_controls_for_risk(r, user_data, conversation_history)
+            link_risk = not (mode == "risk_description" and r.get("id", "") == "")
+            for c in controls:
+                if link_risk and r.get("id"):
+                    c["risk_id"] = r.get("id")
+                c["user_id"] = user_id
+                c["id"] = str(uuid.uuid4())
+            if controls:
+                # Do not save here; return to frontend for selection
+                all_controls.extend(controls)
+
+        # Return generated controls for popup; frontend will save selected ones
+        rc = state.get("risk_context", {}) or {}
+        rc["generated_controls"] = all_controls
+        state["risk_context"] = rc
+        state["generated_controls"] = all_controls
+        state["output"] = (f"Generated {len(all_controls)} controls. "
+                            f"Please select controls to save via the control API.")
+        return state
+    except Exception as e:
+        state["output"] = f"Error generating controls: {str(e)}"
+        return state
+
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="control_library_node")
+def control_library_node(state: LLMState) -> LLMState:
+    print("Control Library Node Activated")
+    try:
+        from rag_tools import semantic_risk_search as risk_tool
+        from rag_tools import semantic_control_search as control_tool
+        user_input = state.get("input", "")
+        user_data = state.get("user_data", {})
+        user_id = user_data.get("username") or user_data.get("user_id") or ""
+        filters = state.get("control_filters", {}) or {}
+        # Use the Tool.invoke API with structured args
+        try:
+            control_result = control_tool.invoke({
+                "query": user_input,
+                "user_id": user_id,
+                "top_k": 50,
+                "filters": filters,
+            })
+        except Exception:
+            # Backward-compatible call signature if Tool not available
+            control_result = control_tool(user_input=user_input, user_id=user_id, top_k=50, filters=filters)
+
+        try:
+            risk_result = risk_tool.invoke({
+                "query": user_input,
+                "user_id": user_id,
+                "top_k": 5,
+                "filters": {},
+                "similar_to_risk_id": None,
+            })
+        except Exception:
+            risk_result = risk_tool(user_input, user_id, 5, {})
+        # Build a natural-language summary with a short preview
+        summary = control_result.get("summary", "") if isinstance(control_result, dict) else str(control_result)
+        results = control_result.get("results", []) if isinstance(control_result, dict) else []
+        count = control_result.get("count", len(results))
+
+        top_n = results[: min(5, count)]
+        if count:
+            # Opening sentence
+            intro = (
+                f"I found {count} controls that match your query. "
+                f"Here’s a quick overview of the top {len(top_n)} to help you scan the most relevant ones."
+            )
+
+            # Convert each item to a compact, readable sentence
+            preview_lines = []
+            for i, item in enumerate(top_n, 1):
+                title = (item.get("title") or "Untitled Control").strip()
+                status = (item.get("status") or "").strip()
+                annex = (item.get("annex") or "").strip()
+                objective = (item.get("objective") or "").strip()
+                if len(objective) > 160:
+                    objective = objective[:160].rstrip() + "…"
+
+                parts = [f"{i}. {title}"]
+                meta_bits = []
+                if annex:
+                    meta_bits.append(f"Annex {annex}")
+                if status:
+                    meta_bits.append(f"status: {status}")
+                if meta_bits:
+                    parts.append(" (" + "; ".join(meta_bits) + ")")
+                if objective:
+                    parts.append(f" — Objective: {objective}")
+                preview_lines.append("".join(parts))
+
+            # Gentle next-steps
+            outro = (
+                "Tell me if you want these filtered further (e.g., by annex or status), "
+                "or select specific controls to save to your library."
+            )
+
+            output = "\n".join([intro, "", *preview_lines, "", outro])
+        else:
+            output = (
+                "I didn’t find any controls for that query. If you’ve just generated new controls, save them first, "
+                "then try searching again or specify a different term (e.g., an Annex like ‘A.5’ or a status like ‘Implemented’)."
+            )
+
+        # Update state risk_context for the frontend to render richer lists
+        rc = state.get("risk_context", {}) or {}
+        rc["controls_search"] = control_result
+        rc["controls_preview"] = top_n
+        rc["risks_search_summary"] = risk_result
+        state["risk_context"] = rc
+
+        ch = state.get("conversation_history", [])
+        ch = ch + [{"user": user_input, "assistant": output}]
+        return {**state, "output": output, "conversation_history": ch}
+    except Exception as e:
+        return {**state, "output": f"Error answering control query: {str(e)}"}
+
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="control_knowledge_node")
+def control_knowledge_node(state: LLMState) -> LLMState:
+    print("Control Knowledge Node Activated")
+    try:
+        user_input = state.get("input", "")
+        ch = state.get("conversation_history", [])
+        from knowledge_base import ISO_27001_KNOWLEDGE
+        system_prompt = f"""
+You are an ISO 27001:2022 controls assistant. Use the provided dataset to answer about Annex A domains and controls. Be concise and map queries to control IDs where possible.
+
+DATASET:
+{ISO_27001_KNOWLEDGE}
+"""
+        resp = make_llm_call_with_history(system_prompt, user_input, ch)
+        ch = ch + [{"user": user_input, "assistant": resp}]
+        return {**state, "output": resp, "conversation_history": ch}
+    except Exception as e:
+        return {**state, "output": f"Error answering control knowledge: {str(e)}"}
+
+def generate_controls_for_risk(risk_data: dict, user_context: dict, conversation_history: list) -> list:
+    """Generate controls for a single risk using direct LLM call"""
+    print(f"DEBUG: Entering generate_controls_for_risk for risk: {risk_data.get('description', 'No description')[:50]}...")
+    try:
+        # Create comprehensive context for control generation
+        risk_context = f"""
+Risk Details:
+- ID: {risk_data.get('id', 'N/A')}
+- Description: {risk_data.get('description', '')}
+- Category: {risk_data.get('category', '')}
+- Impact: {risk_data.get('impact', '')}
+- Likelihood: {risk_data.get('likelihood', '')}
+- Treatment Strategy: {risk_data.get('treatment_strategy', '')}
+- Department: {risk_data.get('department', '')}
+- Risk Owner: {risk_data.get('risk_owner', '')}
+
+Organization Context:
+- Organization: {user_context.get('organization_name', '')}
+- Domain: {user_context.get('domain', '')}
+- Location: {user_context.get('location', '')}
+"""
+        
+        # Debug: Check ISO knowledge
+        iso_knowledge = ISO_27001_KNOWLEDGE.get("ISO27001_2022", {}).get("Annex_A")
+        print(f"DEBUG: ISO Knowledge available: {bool(iso_knowledge)}")
+        if iso_knowledge:
+            print(f"DEBUG: ISO Knowledge type: {type(iso_knowledge)}")
+            if isinstance(iso_knowledge, dict):
+                print(f"DEBUG: ISO Knowledge keys: {list(iso_knowledge.keys())[:5]}")
+        
+        system_prompt = f"""
+You are an ISO 27001:2022 Controls Specialist. Based on the risk provided, generate 3-5 specific, actionable ISO 27001:2022 Annex A controls in the comprehensive format.
+
+Knowledge for the ISO 27001:2022 Annex A references:
+SOURCE OF TRUTH (read-only)
+{ISO_27001_KNOWLEDGE}
+# The above JSON is the canonical dataset. Do not invent entries, numbers, or text that are not present here.
+
+Risk Context:
+{risk_context}
+
+Your task is to analyze this risk and generate relevant controls that would effectively mitigate this specific risk.
+
+For each control, provide a comprehensive structure with:
+1. control_id: Unique identifier (format: C-[NUMBER], e.g., "C-001", "C-002")
+2. control_title: Clear, specific control title
+3. control_description: Detailed description of what this control addresses for this risk
+4. objective: Business objective and purpose of the control
+5. annexA_map: Array of relevant ISO 27001:2022 Annex A mappings with id and title
+6. linked_risk_ids: Array containing the risk ID this control addresses
+7. owner_role: Suggested role responsible for this control (e.g., "CISO", "IT Manager", "Security Officer")
+8. process_steps: Array of 3-5 specific implementation steps
+9. evidence_samples: Array of 3-5 examples of evidence/documentation for this control
+10. metrics: Array of 2-4 measurable KPIs or metrics to track control effectiveness
+11. frequency: How often the control is executed/reviewed (e.g., "Quarterly", "Monthly", "Annually")
+12. policy_ref: Reference to related organizational policy
+13. status: Set to "Planned" for new controls
+14. rationale: Why this control is necessary for mitigating the specific risk
+15. assumptions: Any assumptions made (can be empty string if none)
+
+REQUIREMENTS:
+- Controls must be specifically relevant to the risk described
+- Use appropriate ISO 27001:2022 Annex A references from the knowledge base
+- Make controls actionable and specific to the organization context
+- Ensure process_steps are concrete and implementable
+- Evidence_samples should be realistic audit artifacts
+- Metrics should be measurable and relevant to the control objective
+- Consider the department and risk owner in the owner_role assignment
+
+Return ONLY a valid JSON array of controls in this format:
+[
+  {{
+    "control_id": "C-001",
+    "control_title": "...",
+    "control_description": "...",
+    "objective": "...",
+    "annexA_map": [
+      {{"id": "A.X.Y", "title": "..."}}
+    ],
+    "linked_risk_ids": ["{risk_data.get('id', 'RISK-001')}"],
+    "owner_role": "...",
+    "process_steps": [
+      "Step 1...",
+      "Step 2..."
+    ],
+    "evidence_samples": [
+      "Document 1...",
+      "Report 2..."
+    ],
+    "metrics": [
+      "Metric 1...",
+      "Metric 2..."
+    ],
+    "frequency": "...",
+    "policy_ref": "...",
+    "status": "Planned",
+    "rationale": "...",
+    "assumptions": ""
+  }}
+]
+
+Do not include any explanatory text, only the JSON array.
+"""
+
+        user_input = f"Generate ISO 27001 controls for the risk: {risk_data.get('description', '')}"
+        print(f"DEBUG: Making LLM call with user_input: {user_input[:100]}...")
+        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
+        print(f"DEBUG: LLM response length: {len(response_content)}")
+        print(f"DEBUG: LLM response preview: {response_content[:200]}...")
+        
+        # Parse JSON response
+        content = response_content.strip()
+        if content.startswith("```") and content.endswith("```"):
+            content = content.strip('`').strip()
+            if content.startswith('json'):
+                content = content[4:].strip()
+        
+        # Extract JSON array
+        start = content.find('[')
+        end = content.rfind(']')
+        print(f"DEBUG: JSON array bounds: start={start}, end={end}")
+        if start != -1 and end != -1 and end > start:
+            controls_json = content[start:end+1]
+            print(f"DEBUG: Extracted JSON: {controls_json[:200]}...")
+            controls = json.loads(controls_json)
+            print(f"DEBUG: Parsed {len(controls) if isinstance(controls, list) else 0} controls from JSON")
+            return controls if isinstance(controls, list) else []
+        
+        print("DEBUG: No valid JSON array found in response")
+        return []
+        
+    except json.JSONDecodeError as e:
+        print(f"JSON decode error in control generation: {e}")
+        return []
+    except Exception as e:
+        print(f"Error generating controls for risk: {e}")
+        return []
+
+# 3. Define the risk node
 @traceable(project_name=LANGSMITH_PROJECT_NAME, name="risk_node")
 def risk_node(state: LLMState):
     print("Risk Node Activated")
@@ -1198,7 +1851,20 @@ INTENT CLASSIFICATION RULES:
    - Risk management (as it pertains to ISO requirements)
    - Security controls
 
-3. RISK-RELATED QUERIES: Route to "risk_node" if the query is about:
+3. CONTROL-RELATED QUERIES: Route to "control_node" if the query is about:
+   - Security controls (non-ISO specific)
+   - Control implementation
+   - Control generation or creation
+   - Control frameworks (NIST, CIS, etc.)
+   - Control assessment
+   - Control effectiveness
+   - Control testing
+   - Control management
+   - Administrative, technical, or physical controls
+   - Access controls, network controls, etc.
+   - Control queries
+
+4. RISK-RELATED QUERIES: Route to "risk_node" if the query is about:
    - Risk assessments and analysis
    - Risk query, searching, filtering, and finding (e.g., "find risks with high impact", "show me cybersecurity risks", "list operational risks")
    - Risk registers and risk entries
@@ -1220,6 +1886,26 @@ Route to: audit_facilitator
 User: "Explain Clause 5.2 of ISO 27001"
 Intent: ISO 27001
 Route to: knowledge_node
+
+User: "Generate security controls for my organization"
+Intent: CONTROL-RELATED
+Route to: control_node
+
+User: "Show me access controls for the system"
+Intent: CONTROL-RELATED
+Route to: control_node
+
+User: "What are NIST controls for incident response?"
+Intent: CONTROL-RELATED
+Route to: control_node
+
+User: "Show me the controls for my organization"
+Intent: CONTROL-RELATED
+Route to: control_node
+
+User: "Show me the controls mapped to A.5.37 annex"
+Intent: CONTROL-RELATED
+Route to: control_node
 
 User: "I want to start the audit"
 Intent: AUDIT-RELATED
@@ -1282,9 +1968,10 @@ Intent: RISK-RELATED
 Route to: risk_node
 
 OUTPUT FORMAT:
-You MUST return EXACTLY one of these three strings (nothing else):
+You MUST return EXACTLY one of these four strings (nothing else):
 - audit_facilitator
 - knowledge_node
+- control_node
 - risk_node
 
 Do NOT return any other text, explanations, or formatting. Return ONLY the node name.
@@ -1312,7 +1999,8 @@ Do NOT return any other text, explanations, or formatting. Return ONLY the node 
                 "risk_profile_requested": False,
                 "matrix_recommendation_requested": False,
                 "is_audit_related": True,
-                "is_risk_related": False
+                "is_risk_related": False,
+                "is_control_related": False
             }
         elif "risk_node" in routing_decision:
             return {
@@ -1327,10 +2015,27 @@ Do NOT return any other text, explanations, or formatting. Return ONLY the node 
                 "risk_profile_requested": False,
                 "matrix_recommendation_requested": False,
                 "is_audit_related": False,
-                "is_risk_related": True
+                "is_risk_related": True,
+                "is_control_related": False
+            }
+        elif "control_node" in routing_decision:
+            return {
+                "input": state["input"],
+                "output": "",
+                "conversation_history": conversation_history,
+                "risk_context": risk_context,
+                "user_data": user_data,
+                "risk_generation_requested": False,
+                "preference_update_requested": False,
+                "risk_register_requested": False,
+                "risk_profile_requested": False,
+                "matrix_recommendation_requested": False,
+                "is_audit_related": False,
+                "is_risk_related": False,
+                "is_control_related": True
             }
         else:
-            # Default to ISO auditor for any unrecognized response
+            # Default to knowledge_node for any unrecognized response
             print(f"Unrecognized routing decision: '{routing_decision}', defaulting to knowledge_node")
             return {
                 "input": state["input"],
@@ -1345,11 +2050,12 @@ Do NOT return any other text, explanations, or formatting. Return ONLY the node 
                 "matrix_recommendation_requested": False,
                 "is_audit_related": False,
                 "is_risk_related": False,
+                "is_control_related": False,
                 "is_knowledge_related": True
             }
     except Exception as e:
         print(f"Error in orchestrator: {e}")
-        # Default to ISO auditor if classification fails
+        # Default to knowledge_node if classification fails
         return {
             "input": state["input"],
             "output": "",
@@ -1363,6 +2069,7 @@ Do NOT return any other text, explanations, or formatting. Return ONLY the node 
             "matrix_recommendation_requested": False,
             "is_audit_related": False,
             "is_risk_related": False,
+            "is_control_related": False,
             "is_knowledge_related": True
         }
 
@@ -1447,6 +2154,10 @@ builder.add_node("risk_register", risk_register_node)
 builder.add_node("risk_profile", risk_profile_node)
 builder.add_node("matrix_recommendation", matrix_recommendation_node)
 builder.add_node("knowledge_node", knowledge_node)
+builder.add_node("control_node", control_node)
+builder.add_node("generate_control_node", control_generate_node)
+builder.add_node("control_library_node", control_library_node)
+builder.add_node("control_knowledge_node", control_knowledge_node)
 builder.set_entry_point("orchestrator")
 
 # Add conditional routing from orchestrator
@@ -1476,10 +2187,39 @@ def should_generate_risks(state: LLMState) -> str:
         return "matrix_recommendation"
     return "end"
 
+def route_control_after_classification(state: LLMState) -> str:
+    # Legacy (unused)
+    return "control_library_node"
+
+def route_control_after_retrieval(state: LLMState) -> str:
+    # Legacy (unused)
+    return "control_library_node"
+
+def route_after_selection_controls(state: LLMState) -> str:
+    # Legacy (unused)
+    return "control_library_node"
+
+def route_control_three_way(state: LLMState) -> str:
+    target = state.get("control_target") or "control_library_node"
+    if target in ("generate_control_node", "control_library_node"):
+        return target
+    return "control_library_node"
+
+# New control sub-workflow
+builder.add_conditional_edges("control_node", route_control_three_way, {
+    "generate_control_node": "generate_control_node",
+    "control_library_node": "control_library_node",
+    # "control_knowledge_node": "control_knowledge_node",
+})
+builder.add_edge("generate_control_node", END)
+builder.add_edge("control_library_node", END)
+builder.add_edge("control_knowledge_node", END)
+
 # Add orchestrator routing
 builder.add_conditional_edges("orchestrator", orchestrator_routing, {
     "audit_facilitator": "risk_node",  # Temporary routing to risk_node until audit_facilitator is implemented
     "knowledge_node": "knowledge_node",  # Route to knowledge node for ISO 27001 related queries
+    "control_node": "control_node",  # Route to control node for control-related queries
     "risk_node": "risk_node"
 })
 
@@ -1523,12 +2263,29 @@ def run_agent(message: str, conversation_history: list = None, risk_context: dic
         "risk_profile_requested": False,
         "matrix_recommendation_requested": False,
         "is_audit_related": False,
-        "is_risk_related": False
+        "is_risk_related": False,
+        "is_control_related": False,
+        "is_knowledge_related": False,
+        "control_generation_requested": False,
+        "control_parameters": {},
+        "control_retrieved_context": {},
+        "generated_controls": [],
+        "selected_controls": [],
+        "pending_selection": False,
+        "control_session_id": "",
+        "control_target": "",
+        "control_query": "",
+        "control_filters": {},
+        "risk_description": ""
     }
     
     # Use thread_id for memory persistence within the session
     config = {"configurable": {"thread_id": thread_id}}
     result = graph.invoke(state, config)
+    print(f"DEBUG: Final result - output length: {len(result.get('output', ''))}")
+    print(f"DEBUG: Final result - risk_context keys: {list(result.get('risk_context', {}).keys())}")
+    if 'generated_controls' in result.get('risk_context', {}):
+        print(f"DEBUG: Final result has {len(result['risk_context']['generated_controls'])} controls")
     return result["output"], result["conversation_history"], result["risk_context"], result["user_data"]
 
 

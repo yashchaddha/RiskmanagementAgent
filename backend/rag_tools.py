@@ -2,7 +2,8 @@
 import json
 from typing import Optional, Dict, Any, List
 from langchain_core.tools import tool
-from vector_index import VectorIndexService  # uses Zilliz + OpenAI embeddings (1536-d)
+from vector_index import VectorIndexService
+from vector_index import ControlsVectorIndexService
 
 @tool
 def semantic_risk_search(
@@ -40,3 +41,36 @@ def semantic_risk_search(
     summary = result.get("summary", "No matches found.")
     results_json = json.dumps(result.get("results", []), ensure_ascii=False, indent=2)
     return f"{summary}"
+
+
+@tool
+def semantic_control_search(
+    query: Optional[str],
+    user_id: str,
+    top_k: int = 50,
+    filters: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Semantic search over a user's controls stored in Zilliz/Milvus.
+    Args:
+        query: free-text control query.
+        user_id: tenant scope.
+        top_k: number of results (1-50).
+        filters: optional keys: status(str), annex(str), risk_id(str)
+    Returns:
+        dict: { "summary": str, "results": [ {control_uid,title,objective,status,annex,risk_id,control_text,score}, ... ] }
+    """
+    filters = filters or {}
+    try:
+        result = ControlsVectorIndexService.search(
+            user_id=user_id,
+            query=query or "",
+            top_k=int(top_k or 50),
+            filters=filters,
+        )
+        # Ensure stable shape
+        res = result or {"summary": "No results.", "results": []}
+        res["count"] = len(res.get("results", []))
+        return res
+    except Exception as e:
+        return {"summary": f"Error searching controls: {str(e)}", "results": [], "count": 0}

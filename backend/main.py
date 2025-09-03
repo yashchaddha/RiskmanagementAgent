@@ -2,8 +2,8 @@ from fastapi import FastAPI, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from auth import router as auth_router, get_current_user
 from agent import run_agent, get_finalized_risks_summary, GREETING_MESSAGE
-from database import RiskDatabaseService, RiskProfileDatabaseService
-from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisks, FinalizedRisksResponse
+from database import RiskDatabaseService, RiskProfileDatabaseService, ControlsDatabaseService
+from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisks, FinalizedRisksResponse, Control, ControlSelection
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
@@ -72,10 +72,15 @@ async def chat(request: ChatRequest, current_user=Depends(get_current_user)):
         "risks_applicable": current_user.get("risks_applicable", [])
     }
     
+    # Sanitize incoming risk_context to avoid stale control popups
+    incoming_ctx = request.risk_context or {}
+    if isinstance(incoming_ctx, dict) and "generated_controls" in incoming_ctx:
+        incoming_ctx = {k: v for k, v in incoming_ctx.items() if k != "generated_controls"}
+
     response, updated_history, updated_risk_context, updated_user_data = run_agent(
         request.message, 
         request.conversation_history, 
-        request.risk_context,
+        incoming_ctx,
         user_data
     )
     
@@ -473,4 +478,198 @@ async def update_risk_field(
         return {
             "success": False,
             "message": f"Error updating risk field: {str(e)}"
+        }
+
+class SaveControlsRequest(BaseModel):
+    controls: List[Control]
+
+@app.post("/controls/save")
+async def save_controls(request: SaveControlsRequest, current_user=Depends(get_current_user)):
+    """Save selected controls directly to the database - supports both new and legacy formats"""
+    try:
+        user_id = current_user.get("username", "")
+        
+        if not request.controls:
+            return {
+                "success": False,
+                "message": "No controls provided to save"
+            }
+        
+        # Prepare controls with user context
+        controls_to_save = []
+        for control in request.controls:
+            # Check if this is the new comprehensive format or legacy format
+            if hasattr(control, 'control_title') and control.control_title:
+                # New comprehensive format
+                control_dict = control.model_dump()
+                control_dict["user_id"] = user_id
+            else:
+                # Legacy format - convert to dictionary 
+                control_dict = {
+                    "control_id": control.id,
+                    "title": control.title,
+                    "description": control.description or "",
+                    "domain_category": getattr(control, 'category', '') or getattr(control, 'domain_category', ''),
+                    "annex_reference": getattr(control, 'annex_reference', '') or "",
+                    "control_statement": control.description or "",
+                    "implementation_guidance": getattr(control, 'implementation_guidance', '') or "",
+                    "risk_id": getattr(control, 'risk_id', '') or "",
+                    "user_id": user_id,
+                    "priority": getattr(control, 'priority', 'Medium'),
+                    "status": getattr(control, 'status', 'Planned'),
+                    "owner": getattr(control, 'owner', ''),
+                    "frequency": getattr(control, 'frequency', ''),
+                    "evidence": getattr(control, 'evidence', '')
+                }
+            controls_to_save.append(control_dict)
+        
+        # Save controls to database
+        saved_ids = ControlsDatabaseService.save_controls(controls_to_save)
+
+        # Index saved controls in Zilliz/Milvus
+        try:
+            from vector_index import ControlsVectorIndexService
+            # Fetch the saved control documents by _id for embedding
+            saved_controls = ControlsDatabaseService.get_controls_by_uids(user_id, saved_ids)
+            ControlsVectorIndexService.upsert_controls(user_id, saved_controls)
+        except Exception as e:
+            print(f"Warning: Failed to index controls: {e}")
+
+        return {
+            "success": True,
+            "message": f"Successfully saved {len(saved_ids)} controls to the database",
+            "data": {
+                "saved_count": len(saved_ids),
+                "control_ids": saved_ids
+            }
+        }
+    
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error saving controls: {str(e)}"
+        }
+
+@app.get("/controls/all")
+async def get_all_controls(current_user=Depends(get_current_user)):
+    """Get all controls for the current user"""
+    try:
+        user_id = current_user.get("username", "")
+        controls = ControlsDatabaseService.get_all_user_controls(user_id)
+        
+        return {
+            "success": True,
+            "message": f"Retrieved {len(controls)} controls",
+            "data": {
+                "controls": controls,
+                "total_count": len(controls)
+            }
+        }
+    
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error retrieving controls: {str(e)}"
+        }
+
+@app.get("/controls/status/{status}")
+async def get_controls_by_status(status: str, current_user=Depends(get_current_user)):
+    """Get controls filtered by implementation status"""
+    try:
+        user_id = current_user.get("username", "")
+        controls = ControlsDatabaseService.get_controls_by_status(status, user_id)
+        
+        return {
+            "success": True,
+            "message": f"Retrieved {len(controls)} controls with status '{status}'",
+            "data": {
+                "controls": controls,
+                "status": status,
+                "total_count": len(controls)
+            }
+        }
+    
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error retrieving controls by status: {str(e)}"
+        }
+
+@app.get("/controls/search")
+async def search_controls(q: str, current_user=Depends(get_current_user)):
+    """Search controls by text query"""
+    try:
+        user_id = current_user.get("username", "")
+        controls = ControlsDatabaseService.search_controls(q, user_id)
+        
+        return {
+            "success": True,
+            "message": f"Found {len(controls)} controls matching '{q}'",
+            "data": {
+                "controls": controls,
+                "query": q,
+                "total_count": len(controls)
+            }
+        }
+    
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error searching controls: {str(e)}"
+        }
+
+@app.get("/controls/risk/{risk_id}")
+async def get_controls_by_risk(risk_id: str, current_user=Depends(get_current_user)):
+    """Get controls linked to a specific risk"""
+    try:
+        user_id = current_user.get("username", "")
+        controls = ControlsDatabaseService.get_controls_by_linked_risk(risk_id, user_id)
+        
+        return {
+            "success": True,
+            "message": f"Found {len(controls)} controls for risk '{risk_id}'",
+            "data": {
+                "controls": controls,
+                "risk_id": risk_id,
+                "total_count": len(controls)
+            }
+        }
+    
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error retrieving controls for risk: {str(e)}"
+        }
+
+class UpdateControlStatusRequest(BaseModel):
+    control_id: str
+    status: str
+
+@app.put("/controls/status")
+async def update_control_status(request: UpdateControlStatusRequest, current_user=Depends(get_current_user)):
+    """Update the implementation status of a control"""
+    try:
+        user_id = current_user.get("username", "")
+        
+        success = ControlsDatabaseService.update_control(
+            request.control_id, 
+            user_id, 
+            {"status": request.status}
+        )
+        
+        if success:
+            return {
+                "success": True,
+                "message": f"Successfully updated control {request.control_id} status to {request.status}"
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Control {request.control_id} not found or no changes made"
+            }
+    
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error updating control status: {str(e)}"
         }
