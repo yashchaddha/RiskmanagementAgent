@@ -16,7 +16,6 @@ from typing import List, Dict, Any
 from dependencies import get_llm
 from knowledge_base import ISO_27001_KNOWLEDGE
 from langsmith import traceable
-from openai_service import openai_service
 import uuid
 from database import ControlsDatabaseService
 
