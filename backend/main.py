@@ -183,10 +183,19 @@ async def update_risk_selection(
 async def finalize_risks(request: FinalizeRisksRequest, current_user=Depends(get_current_user)):
     """Finalize selected risks by saving them to finalized_risks collection"""
     try:
+        print(f"DEBUG: finalize_risks endpoint called")
+        print(f"DEBUG: current_user type: {type(current_user)}")
+        print(f"DEBUG: current_user keys: {list(current_user.keys()) if current_user else 'None'}")
+        print(f"DEBUG: request.risks type: {type(request.risks)}")
+        print(f"DEBUG: request.risks length: {len(request.risks) if request.risks else 'None'}")
+        
         user_id = current_user.get("username", "")
         organization_name = current_user.get("organization_name", "")
         location = current_user.get("location", "")
         domain = current_user.get("domain", "")
+        
+        print(f"DEBUG: Extracted user_id: {user_id}")
+        print(f"DEBUG: Extracted org_name: {organization_name}")
         
         result = await RiskDatabaseService.save_finalized_risks(
             user_id=user_id,
@@ -198,6 +207,10 @@ async def finalize_risks(request: FinalizeRisksRequest, current_user=Depends(get
         
         return result
     except Exception as e:
+        print(f"DEBUG: Exception in finalize_risks: {str(e)}")
+        print(f"DEBUG: Exception type: {type(e)}")
+        import traceback
+        print(f"DEBUG: Traceback: {traceback.format_exc()}")
         return FinalizedRisksResponse(
             success=False,
             message=f"Error finalizing risks: {str(e)}",

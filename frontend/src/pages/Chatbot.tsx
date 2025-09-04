@@ -48,17 +48,36 @@ interface ChatTurn {
   content: string;
 }
 
-interface RiskLevel { level: number; title: string; description: string; }
-interface MatrixProfile { riskType: string; definition: string; likelihoodScale: RiskLevel[]; impactScale: RiskLevel[]; matrixSize: string; }
-interface EditableRiskProfile extends MatrixProfile { isEditing?: boolean }
-interface MatrixPreviewData { matrix_size: string; profiles: MatrixProfile[]; totalProfiles: number }
+interface RiskLevel {
+  level: number;
+  title: string;
+  description: string;
+}
+interface MatrixProfile {
+  riskType: string;
+  definition: string;
+  likelihoodScale: RiskLevel[];
+  impactScale: RiskLevel[];
+  matrixSize: string;
+}
+interface EditableRiskProfile extends MatrixProfile {
+  isEditing?: boolean;
+}
+interface MatrixPreviewData {
+  matrix_size: string;
+  profiles: MatrixProfile[];
+  totalProfiles: number;
+}
 
 // Global animation state to prevent restarts
-const animationStates = new Map<string, {
-  isAnimating: boolean;
-  currentText: string;
-  timer: number | null;
-}>();
+const animationStates = new Map<
+  string,
+  {
+    isAnimating: boolean;
+    currentText: string;
+    timer: number | null;
+  }
+>();
 
 const AnimatedText: React.FC<{ text: string; animate: boolean; onDone?: () => void; onProgress?: () => void; speedMsPerChar?: number; messageId?: string }> = ({ text, animate, onDone, onProgress, speedMsPerChar = 15, messageId }) => {
   const [displayedText, setDisplayedText] = useState(animate ? "" : text);
@@ -91,7 +110,7 @@ const AnimatedText: React.FC<{ text: string; animate: boolean; onDone?: () => vo
     }
 
     const state = animationStates.get(messageId);
-    
+
     // If we're already animating the same text, don't restart
     if (state && state.isAnimating && state.currentText === text) {
       return;
@@ -136,7 +155,7 @@ const AnimatedText: React.FC<{ text: string; animate: boolean; onDone?: () => vo
     animationStates.set(messageId, {
       isAnimating: true,
       currentText: text,
-      timer
+      timer,
     });
 
     return () => {
@@ -287,7 +306,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
         throw new Error("No authentication token found");
       }
 
-      const response = await fetch("https://api.agentic.complynexus.com/chat", {
+      const response = await fetch("http://localhost:8000/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -358,7 +377,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
     setIsGeneratingSummary(true);
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("https://api.agentic.complynexus.com/risk-summary/finalized", {
+      const response = await fetch("http://localhost:8000/risk-summary/finalized", {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
@@ -395,13 +414,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   };
 
   const getQuickActions = () => {
-    return [
-      "Generate risks for our organization",
-      "Open risk register",
-      "Generate finalized risks summary",
-      "Update my risk preferences",
-      "Help me create a risk assessment framework",
-    ];
+    return ["Generate risks for our organization", "Open risk register", "Generate finalized risks summary", "Update my risk preferences", "Help me create a risk assessment framework"];
   };
 
   const handleQuickAction = (action: string) => {
@@ -425,7 +438,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       const riskIndex = generatedRisks.findIndex((risk) => risk.id === riskId);
 
       if (riskIndex !== -1) {
-        const response = await fetch(`https://api.agentic.complynexus.com/risks/${riskIndex}/selection`, {
+        const response = await fetch(`http://localhost:8000/risks/${riskIndex}/selection`, {
           method: "PUT",
           headers: {
             "Content-Type": "application/json",
@@ -457,7 +470,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
 
       console.log("Finalizing risks:", risksToFinalize); // Debug log
 
-      const response = await fetch("https://api.agentic.complynexus.com/risks/finalize", {
+      const response = await fetch("http://localhost:8000/risks/finalize", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -569,7 +582,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
 
       console.log("Sending matrix recommendation request to agent:", matrixMessage);
 
-      const response = await fetch("https://api.agentic.complynexus.com/chat", {
+      const response = await fetch("http://localhost:8000/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -625,7 +638,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
           // Fallback: Fetch matrix data from API if agent didn't generate it
           console.log("No matrix data from agent, fetching from API");
           try {
-            const matrixDataResponse = await fetch("https://api.agentic.complynexus.com/user/risk-profiles/matrix-recommendation", {
+            const matrixDataResponse = await fetch("http://localhost:8000/user/risk-profiles/matrix-recommendation", {
               method: "POST",
               headers: {
                 Authorization: `Bearer ${token}`,
@@ -672,7 +685,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const applyMatrixRecommendation = async (matrixSize: string) => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("https://api.agentic.complynexus.com/user/risk-profiles/apply-matrix-recommendation", {
+      const response = await fetch("http://localhost:8000/user/risk-profiles/apply-matrix-recommendation", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -715,7 +728,7 @@ You can continue using the risk profile dashboard to further customize the scale
       console.log("Applying matrix configuration:", { matrixSize, updatedProfiles });
 
       // Use the new endpoint that accepts custom profiles
-      const response = await fetch("https://api.agentic.complynexus.com/user/risk-profiles/apply-matrix-configuration", {
+      const response = await fetch("http://localhost:8000/user/risk-profiles/apply-matrix-configuration", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -810,7 +823,7 @@ Please try again or contact support if the issue persists.`,
   const saveRisksToDatabase = async (risks: Risk[]) => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("https://api.agentic.complynexus.com/risks/save", {
+      const response = await fetch("http://localhost:8000/risks/save", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -933,14 +946,14 @@ Please try again or contact support if the issue persists.`,
               {message.sender === "bot" ? (
                 <>
                   <div className="bot-header">
-                    <img src={badge} alt="Risk Agent" className="bot-badge-img" style={{width: '500px', height: '22px', display: 'block'}} />
+                    <img src={badge} alt="Risk Agent" className="bot-badge-img" style={{ width: "500px", height: "22px", display: "block" }} />
                   </div>
-                  <AnimatedText 
-                    text={message.text} 
-                    animate={animateMessageId === message.id} 
-                    onProgress={scrollToBottom} 
-                    onDone={() => { 
-                      if (animateMessageId === message.id) setAnimateMessageId(null); 
+                  <AnimatedText
+                    text={message.text}
+                    animate={animateMessageId === message.id}
+                    onProgress={scrollToBottom}
+                    onDone={() => {
+                      if (animateMessageId === message.id) setAnimateMessageId(null);
                     }}
                     messageId={message.id}
                   />

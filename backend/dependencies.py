@@ -13,6 +13,6 @@ def get_llm():
     """Get the OpenAI language model instance"""
     return ChatOpenAI(
         model="gpt-5",
-        seed=1234
+        seed=1234,
         api_key=os.getenv("OPENAI_API_KEY")
     )

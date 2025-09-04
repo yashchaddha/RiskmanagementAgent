@@ -70,7 +70,9 @@ class RiskDatabaseService:
                 ]
                 
                 # Append new risks to existing risks array
-                updated_risks = existing_doc["risks"] + new_risks
+                # Use .get() to handle cases where existing document might not have "risks" field
+                existing_risks = existing_doc.get("risks", [])
+                updated_risks = existing_risks + new_risks
                 total_risks = len(updated_risks)
                 selected_risks = sum(1 for risk in updated_risks if risk["is_selected"])
                 
@@ -250,7 +252,8 @@ class RiskDatabaseService:
                 )
             
             # Check if the risk index is valid
-            if risk_index >= len(risk_doc["risks"]):
+            risks_array = risk_doc.get("risks", [])
+            if risk_index >= len(risks_array):
                 return RiskResponse(
                     success=False,
                     message="Invalid risk index",
@@ -313,6 +316,10 @@ class RiskDatabaseService:
     ) -> FinalizedRisksResponse:
         """Save selected risks as finalized risks"""
         try:
+            print(f"DEBUG: save_finalized_risks called with user_id={user_id}")
+            print(f"DEBUG: selected_risks type: {type(selected_risks)}")
+            print(f"DEBUG: selected_risks length: {len(selected_risks) if selected_risks else 'None'}")
+            
             # Verify user exists in the users collection
             user = users_collection.find_one({"username": user_id})
             if not user:
@@ -324,6 +331,7 @@ class RiskDatabaseService:
             
             # Filter only selected risks
             finalized_risks = [risk for risk in selected_risks if risk.is_selected]
+            print(f"DEBUG: finalized_risks length: {len(finalized_risks)}")
             
             if not finalized_risks:
                 return FinalizedRisksResponse(
@@ -332,6 +340,7 @@ class RiskDatabaseService:
                     data=None
                 )
             
+            print(f"DEBUG: About to check existing document for user._id: {user.get('_id')}")
             # Check if a finalized risks document already exists for this user
             existing_doc = finalized_risks_collection.find_one({"user_ref": user["_id"]})
             
@@ -359,8 +368,14 @@ class RiskDatabaseService:
                 ]
                 
                 # Append new finalized risks to existing risks array
-                updated_risks = existing_doc["risks"] + new_finalized_risks
+                # Use .get() to handle cases where existing document might not have "risks" field
+                existing_risks = existing_doc.get("risks", [])
+                updated_risks = existing_risks + new_finalized_risks
                 total_risks = len(updated_risks)
+                
+                print(f"DEBUG: existing_risks length: {len(existing_risks)}")
+                print(f"DEBUG: new_finalized_risks length: {len(new_finalized_risks)}")
+                print(f"DEBUG: updated_risks length: {len(updated_risks)}")
                 
                 # Update the existing document
                 result = finalized_risks_collection.update_one(
@@ -411,25 +426,14 @@ class RiskDatabaseService:
                     )
 
                     # Update the vector index
-                    # Convert Risk objects to dictionaries for vector service
-                    risks_dicts = [
-                        {
-                            "_id": ObjectId(risk.id) if risk.id else ObjectId(),
-                            "description": risk.description,
-                            "category": risk.category,
-                            "likelihood": risk.likelihood,
-                            "impact": risk.impact,
-                            "treatment_strategy": risk.treatment_strategy,
-                            "asset_value": risk.asset_value,
-                            "department": risk.department,
-                            "risk_owner": risk.risk_owner,
-                            "security_impact": risk.security_impact,
-                            "target_date": risk.target_date,
-                            "risk_progress": risk.risk_progress,
-                            "residual_exposure": risk.residual_exposure
-                        }
-                        for risk in finalized_risks
-                    ]
+                    # Use the newly appended risks from the database for vector indexing
+                    risks_dicts = new_finalized_risks
+                    print(f"DEBUG: About to call VectorIndexService.upsert_finalized_risks")
+                    print(f"DEBUG: risks_dicts type: {type(risks_dicts)}")
+                    print(f"DEBUG: risks_dicts length: {len(risks_dicts) if risks_dicts else 'None'}")
+                    if risks_dicts:
+                        print(f"DEBUG: First risk dict keys: {list(risks_dicts[0].keys()) if risks_dicts[0] else 'No first item'}")
+                    
                     VectorIndexService.upsert_finalized_risks(
                         user_id=user_id,
                         organization_name=organization_name,
@@ -522,24 +526,14 @@ class RiskDatabaseService:
                 )
 
                 # Convert Risk objects to dictionaries for vector service
-                risks_dicts = [
-                    {
-                        "_id": ObjectId(risk.id) if risk.id else ObjectId(),
-                        "description": risk.description,
-                        "category": risk.category,
-                        "likelihood": risk.likelihood,
-                        "impact": risk.impact,
-                        "treatment_strategy": risk.treatment_strategy,
-                        "asset_value": risk.asset_value,
-                        "department": risk.department,
-                        "risk_owner": risk.risk_owner,
-                        "security_impact": risk.security_impact,
-                        "target_date": risk.target_date,
-                        "risk_progress": risk.risk_progress,
-                        "residual_exposure": risk.residual_exposure
-                    }
-                    for risk in finalized_risks
-                ]
+                # Use the risks that were just inserted into the database
+                risks_dicts = inserted_doc["risks"]
+                print(f"DEBUG: About to call VectorIndexService.upsert_finalized_risks (new document)")
+                print(f"DEBUG: risks_dicts type: {type(risks_dicts)}")
+                print(f"DEBUG: risks_dicts length: {len(risks_dicts) if risks_dicts else 'None'}")
+                if risks_dicts:
+                    print(f"DEBUG: First risk dict keys: {list(risks_dicts[0].keys()) if risks_dicts[0] else 'No first item'}")
+                
                 VectorIndexService.upsert_finalized_risks(
                     user_id=user_id,
                     organization_name=organization_name,
@@ -555,6 +549,10 @@ class RiskDatabaseService:
                 )
             
         except Exception as e:
+            print(f"DEBUG: Exception in save_finalized_risks: {str(e)}")
+            print(f"DEBUG: Exception type: {type(e)}")
+            import traceback
+            print(f"DEBUG: Traceback: {traceback.format_exc()}")
             return FinalizedRisksResponse(
                 success=False,
                 message=f"Error finalizing risks: {str(e)}",

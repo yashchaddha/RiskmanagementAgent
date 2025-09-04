@@ -6,7 +6,7 @@ interface AuthProps {
   onAuthSuccess: (token: string) => void;
 }
 
-const API_URL = import.meta.env.VITE_API_URL || "https://api.agentic.complynexus.com";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 export const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
   const [isSignup, setIsSignup] = useState(false);
@@ -26,20 +26,18 @@ export const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
     try {
       const url = isSignup ? `${API_URL}/auth/signup` : `${API_URL}/auth/login`;
       const body = isSignup
-        ? { 
-            username, 
-            password, 
+        ? {
+            username,
+            password,
             organization_name: organizationName,
             location,
             domain,
-            risks_applicable: risksApplicable
+            risks_applicable: risksApplicable,
           }
         : new URLSearchParams({ username, password });
       const res = await fetch(url, {
         method: "POST",
-        headers: isSignup
-          ? { "Content-Type": "application/json" }
-          : { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: isSignup ? { "Content-Type": "application/json" } : { "Content-Type": "application/x-www-form-urlencoded" },
         body: isSignup ? JSON.stringify(body) : body.toString(),
       });
       if (!res.ok) {
@@ -67,7 +65,7 @@ export const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
   };
 
   const toggleMode = () => {
-    setIsSignup(s => !s);
+    setIsSignup((s) => !s);
     clearForm();
   };
 
@@ -85,57 +83,25 @@ export const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
 
       <div className="auth-card">
         <h2>{isSignup ? "Create account" : "Welcome back"}</h2>
-        <p className="auth-description">
-          {isSignup
-            ? "Create your organization workspace to access risk tools."
-            : "Access your organization's risk assessment dashboard and compliance tools."}
-        </p>
+        <p className="auth-description">{isSignup ? "Create your organization workspace to access risk tools." : "Access your organization's risk assessment dashboard and compliance tools."}</p>
 
         <form onSubmit={handleSubmit}>
-          <input
-            type="text"
-            placeholder="Username"
-            value={username}
-            onChange={e => setUsername(e.target.value)}
-            required
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={e => setPassword(e.target.value)}
-            required
-          />
+          <input type="text" placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value)} required />
+          <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required />
 
           {isSignup && (
             <>
-              <input
-                type="text"
-                placeholder="Organization name"
-                value={organizationName}
-                onChange={e => setOrganizationName(e.target.value)}
-                required
-              />
-              <input
-                type="text"
-                placeholder="Location (City, Country)"
-                value={location}
-                onChange={e => setLocation(e.target.value)}
-                required
-              />
-              <input
-                type="text"
-                placeholder="Industry domain (e.g., Finance, Healthcare)"
-                value={domain}
-                onChange={e => setDomain(e.target.value)}
-                required
-              />
+              <input type="text" placeholder="Organization name" value={organizationName} onChange={(e) => setOrganizationName(e.target.value)} required />
+              <input type="text" placeholder="Location (City, Country)" value={location} onChange={(e) => setLocation(e.target.value)} required />
+              <input type="text" placeholder="Industry domain (e.g., Finance, Healthcare)" value={domain} onChange={(e) => setDomain(e.target.value)} required />
             </>
           )}
 
           {!isSignup && (
             <div className="aux-row">
-              <a href="#" onClick={e => e.preventDefault()} className="link subtle">Forgot password?</a>
+              <a href="#" onClick={(e) => e.preventDefault()} className="link subtle">
+                Forgot password?
+              </a>
             </div>
           )}
 
@@ -151,7 +117,9 @@ export const Auth: React.FC<AuthProps> = ({ onAuthSuccess }) => {
         {error && <div className="error">{error}</div>}
       </div>
 
-      <div className="footer">© {new Date().getFullYear()} <span>ComplyNexus</span> All Rights Reserved.</div>
+      <div className="footer">
+        © {new Date().getFullYear()} <span>ComplyNexus</span> All Rights Reserved.
+      </div>
     </div>
   );
-}; 
+};

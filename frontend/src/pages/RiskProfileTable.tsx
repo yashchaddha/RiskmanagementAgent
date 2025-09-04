@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import './RiskProfileTable.css';
+import React, { useState, useEffect } from "react";
+import "./RiskProfileTable.css";
 
 interface RiskLevel {
   level: number;
@@ -37,18 +37,18 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
 
   const fetchRiskProfiles = async () => {
     try {
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem("token");
       if (!token) {
-        setError('No authentication token found');
+        setError("No authentication token found");
         setLoading(false);
         return;
       }
 
-              const response = await fetch('https://api.agentic.complynexus.com/user/risk-profiles/table', {
+      const response = await fetch("http://localhost:8000/user/risk-profiles/table", {
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        }
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
       });
 
       if (response.ok) {
@@ -56,14 +56,14 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
         if (data.success) {
           setProfiles(data.tableData);
         } else {
-          setError(data.message || 'Failed to load risk profiles');
+          setError(data.message || "Failed to load risk profiles");
         }
       } else {
-        setError('Failed to fetch risk profiles');
+        setError("Failed to fetch risk profiles");
       }
     } catch (error) {
-      setError('Error connecting to server');
-      console.error('Error fetching risk profiles:', error);
+      setError("Error connecting to server");
+      console.error("Error fetching risk profiles:", error);
     } finally {
       setLoading(false);
     }
@@ -78,58 +78,60 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
   };
 
   const handleProfileUpdate = (riskType: string, field: string, value: string | RiskLevel[], index?: number) => {
-    setProfiles(prev => prev.map(profile => {
-      if (field === 'definition' && profile.riskType === riskType) {
-        return { ...profile, definition: value as string };
-      } else if (field === 'likelihoodScale' && Array.isArray(value) && profile.riskType === riskType) {
-        return { ...profile, likelihoodScale: value as RiskLevel[] };
-      } else if (field === 'impactScale' && Array.isArray(value) && profile.riskType === riskType) {
-        return { ...profile, impactScale: value as RiskLevel[] };
-      } else if (field === 'likelihoodTitle' && typeof index === 'number') {
-        // Propagate likelihood title change to all profiles
-        const newScale = [...profile.likelihoodScale];
-        newScale[index] = { ...newScale[index], title: value as string };
-        return { ...profile, likelihoodScale: newScale };
-      } else if (field === 'likelihoodDescription' && typeof index === 'number' && profile.riskType === riskType) {
-        const newScale = [...profile.likelihoodScale];
-        newScale[index] = { ...newScale[index], description: value as string };
-        return { ...profile, likelihoodScale: newScale };
-      } else if (field === 'impactTitle' && typeof index === 'number') {
-        // Propagate impact title change to all profiles
-        const newScale = [...profile.impactScale];
-        newScale[index] = { ...newScale[index], title: value as string };
-        return { ...profile, impactScale: newScale };
-      } else if (field === 'impactDescription' && typeof index === 'number' && profile.riskType === riskType) {
-        const newScale = [...profile.impactScale];
-        newScale[index] = { ...newScale[index], description: value as string };
-        return { ...profile, impactScale: newScale };
-      }
-      return profile;
-    }));
+    setProfiles((prev) =>
+      prev.map((profile) => {
+        if (field === "definition" && profile.riskType === riskType) {
+          return { ...profile, definition: value as string };
+        } else if (field === "likelihoodScale" && Array.isArray(value) && profile.riskType === riskType) {
+          return { ...profile, likelihoodScale: value as RiskLevel[] };
+        } else if (field === "impactScale" && Array.isArray(value) && profile.riskType === riskType) {
+          return { ...profile, impactScale: value as RiskLevel[] };
+        } else if (field === "likelihoodTitle" && typeof index === "number") {
+          // Propagate likelihood title change to all profiles
+          const newScale = [...profile.likelihoodScale];
+          newScale[index] = { ...newScale[index], title: value as string };
+          return { ...profile, likelihoodScale: newScale };
+        } else if (field === "likelihoodDescription" && typeof index === "number" && profile.riskType === riskType) {
+          const newScale = [...profile.likelihoodScale];
+          newScale[index] = { ...newScale[index], description: value as string };
+          return { ...profile, likelihoodScale: newScale };
+        } else if (field === "impactTitle" && typeof index === "number") {
+          // Propagate impact title change to all profiles
+          const newScale = [...profile.impactScale];
+          newScale[index] = { ...newScale[index], title: value as string };
+          return { ...profile, impactScale: newScale };
+        } else if (field === "impactDescription" && typeof index === "number" && profile.riskType === riskType) {
+          const newScale = [...profile.impactScale];
+          newScale[index] = { ...newScale[index], description: value as string };
+          return { ...profile, impactScale: newScale };
+        }
+        return profile;
+      })
+    );
   };
 
   const saveProfileChanges = async (riskType: string) => {
     setSaving(true);
     try {
-      const profile = profiles.find(p => p.riskType === riskType);
+      const profile = profiles.find((p) => p.riskType === riskType);
       if (!profile) return;
 
-      const token = localStorage.getItem('token');
-      
+      const token = localStorage.getItem("token");
+
       // Save all profiles to ensure synchronized changes are persisted
       const savePromises = profiles.map(async (profileToSave) => {
-        const response = await fetch('https://api.agentic.complynexus.com/user/risk-profiles/update', {
-          method: 'PUT',
+        const response = await fetch("http://localhost:8000/user/risk-profiles/update", {
+          method: "PUT",
           headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
           },
           body: JSON.stringify({
             riskType: profileToSave.riskType,
             definition: profileToSave.definition,
             likelihoodScale: profileToSave.likelihoodScale,
-            impactScale: profileToSave.impactScale
-          })
+            impactScale: profileToSave.impactScale,
+          }),
         });
 
         if (!response.ok) {
@@ -142,9 +144,9 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
       await Promise.all(savePromises);
       setEditingProfile(null);
       // Show success message
-      console.log('All risk profiles updated successfully');
+      console.log("All risk profiles updated successfully");
     } catch (error) {
-      console.error('Error saving profiles:', error);
+      console.error("Error saving profiles:", error);
       // Show error message to user
     } finally {
       setSaving(false);
@@ -190,7 +192,7 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
             ✕
           </button>
         </div>
-        
+
         {editingProfile && (
           <div className="sync-notice">
             <span className="sync-icon">🔄</span>
@@ -209,10 +211,7 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
               {profiles.map((profile) => (
                 <div key={profile.riskType} className="profile-card">
                   <div className="profile-header">
-                    <div 
-                      className="profile-title"
-                      onClick={() => toggleProfileExpansion(profile.riskType)}
-                    >
+                    <div className="profile-title" onClick={() => toggleProfileExpansion(profile.riskType)}>
                       <h3>{profile.riskType}</h3>
                       <span className="matrix-size">{profile.matrixSize}</span>
                     </div>
@@ -224,7 +223,7 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
                           toggleEditMode(profile.riskType);
                         }}
                       >
-                        {editingProfile === profile.riskType ? 'Cancel' : 'Edit'}
+                        {editingProfile === profile.riskType ? "Cancel" : "Edit"}
                       </button>
                       {editingProfile === profile.riskType && (
                         <button
@@ -235,30 +234,16 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
                           }}
                           disabled={saving}
                         >
-                          {saving ? 'Saving...' : 'Save'}
+                          {saving ? "Saving..." : "Save"}
                         </button>
                       )}
-                      <div 
-                        className="expand-icon"
-                        onClick={() => toggleProfileExpansion(profile.riskType)}
-                      >
-                        {expandedProfile === profile.riskType ? '▼' : '▶'}
+                      <div className="expand-icon" onClick={() => toggleProfileExpansion(profile.riskType)}>
+                        {expandedProfile === profile.riskType ? "▼" : "▶"}
                       </div>
                     </div>
                   </div>
 
-                  <div className="profile-definition">
-                    {editingProfile === profile.riskType ? (
-                      <textarea
-                        value={profile.definition}
-                        onChange={(e) => handleProfileUpdate(profile.riskType, 'definition', e.target.value)}
-                        className="editable-definition"
-                        rows={3}
-                      />
-                    ) : (
-                      <p>{profile.definition}</p>
-                    )}
-                  </div>
+                  <div className="profile-definition">{editingProfile === profile.riskType ? <textarea value={profile.definition} onChange={(e) => handleProfileUpdate(profile.riskType, "definition", e.target.value)} className="editable-definition" rows={3} /> : <p>{profile.definition}</p>}</div>
 
                   {expandedProfile === profile.riskType && (
                     <div className="profile-details">
@@ -281,31 +266,16 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
                                     <td className="title-cell">
                                       {editingProfile === profile.riskType ? (
                                         <div className="synchronized-input-container">
-                                          <input
-                                            type="text"
-                                            value={level.title}
-                                            onChange={(e) => handleProfileUpdate(profile.riskType, 'likelihoodTitle', e.target.value, index)}
-                                            className="editable-input synchronized-input"
-                                            title="This change will apply to all risk categories"
-                                          />
-                                          <span className="sync-indicator" title="Synchronized across all categories">🔄</span>
+                                          <input type="text" value={level.title} onChange={(e) => handleProfileUpdate(profile.riskType, "likelihoodTitle", e.target.value, index)} className="editable-input synchronized-input" title="This change will apply to all risk categories" />
+                                          <span className="sync-indicator" title="Synchronized across all categories">
+                                            🔄
+                                          </span>
                                         </div>
                                       ) : (
                                         level.title
                                       )}
                                     </td>
-                                    <td className="description-cell">
-                                      {editingProfile === profile.riskType ? (
-                                        <textarea
-                                          value={level.description}
-                                          onChange={(e) => handleProfileUpdate(profile.riskType, 'likelihoodDescription', e.target.value, index)}
-                                          className="editable-textarea"
-                                          rows={2}
-                                        />
-                                      ) : (
-                                        level.description
-                                      )}
-                                    </td>
+                                    <td className="description-cell">{editingProfile === profile.riskType ? <textarea value={level.description} onChange={(e) => handleProfileUpdate(profile.riskType, "likelihoodDescription", e.target.value, index)} className="editable-textarea" rows={2} /> : level.description}</td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -331,31 +301,16 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
                                     <td className="title-cell">
                                       {editingProfile === profile.riskType ? (
                                         <div className="synchronized-input-container">
-                                          <input
-                                            type="text"
-                                            value={level.title}
-                                            onChange={(e) => handleProfileUpdate(profile.riskType, 'impactTitle', e.target.value, index)}
-                                            className="editable-input synchronized-input"
-                                            title="This change will apply to all risk categories"
-                                          />
-                                          <span className="sync-indicator" title="Synchronized across all categories">🔄</span>
+                                          <input type="text" value={level.title} onChange={(e) => handleProfileUpdate(profile.riskType, "impactTitle", e.target.value, index)} className="editable-input synchronized-input" title="This change will apply to all risk categories" />
+                                          <span className="sync-indicator" title="Synchronized across all categories">
+                                            🔄
+                                          </span>
                                         </div>
                                       ) : (
                                         level.title
                                       )}
                                     </td>
-                                    <td className="description-cell">
-                                      {editingProfile === profile.riskType ? (
-                                        <textarea
-                                          value={level.description}
-                                          onChange={(e) => handleProfileUpdate(profile.riskType, 'impactDescription', e.target.value, index)}
-                                          className="editable-textarea"
-                                          rows={2}
-                                        />
-                                      ) : (
-                                        level.description
-                                      )}
-                                    </td>
+                                    <td className="description-cell">{editingProfile === profile.riskType ? <textarea value={level.description} onChange={(e) => handleProfileUpdate(profile.riskType, "impactDescription", e.target.value, index)} className="editable-textarea" rows={2} /> : level.description}</td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -373,4 +328,4 @@ export const RiskProfileTable: React.FC<RiskProfileTableProps> = ({ onClose }) =
       </div>
     </div>
   );
-}; 
+};

@@ -1,19 +1,23 @@
 import os
 from dotenv import load_dotenv
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.graph import MessagesState, START
 from langchain_openai import OpenAIEmbeddings
 from pymilvus import MilvusClient
-from rag_tools import semantic_risk_search
+# from rag_tools import semantic_risk_search
 from typing_extensions import TypedDict
 from typing import List, Dict, Any
 from dependencies import get_llm
 import json
 from knowledge_base import ISO_27001_KNOWLEDGE
 from langsmith import traceable
+from database import RiskProfileDatabaseService
+import traceback
 
 # Load environment variables from .env
 load_dotenv()
@@ -68,7 +72,9 @@ def semantic_risk_search(query: str, user_id: str, top_k: int = 5) -> dict:
         )
         OUTPUT_FIELDS = [
             "risk_id", "user_id", "organization_name", "location", "domain", 
-            "category", "department", "risk_owner", "risk_text"
+            "category", "description", "likelihood", "impact", "treatment_strategy",
+            "department", "risk_owner", "asset_value", "security_impact", 
+            "target_date", "risk_progress", "residual_exposure", "risk_text"
         ]
         expr = f"user_id == '{user_id}'"
         results = client.search(
@@ -98,8 +104,17 @@ def semantic_risk_search(query: str, user_id: str, top_k: int = 5) -> dict:
                     "location": entity.get("location"),
                     "domain": entity.get("domain"),
                     "category": entity.get("category"),
+                    "description": entity.get("description"),
+                    "likelihood": entity.get("likelihood"),
+                    "impact": entity.get("impact"),
+                    "treatment_strategy": entity.get("treatment_strategy"),
                     "department": entity.get("department"),
                     "risk_owner": entity.get("risk_owner"),
+                    "asset_value": entity.get("asset_value"),
+                    "security_impact": entity.get("security_impact"),
+                    "target_date": entity.get("target_date"),
+                    "risk_progress": entity.get("risk_progress"),
+                    "residual_exposure": entity.get("residual_exposure"),
                     "risk_text": entity.get("risk_text"),
                 })
 
@@ -431,8 +446,6 @@ def risk_generation_node(state: LLMState):
 
         print(f"User data: organization={organization_name}, location={location}, domain={domain}")
         
-        # Get user's risk profiles to use their specific scales
-        from database import RiskProfileDatabaseService
         # Synchronously retrieve risk profiles
         result = RiskProfileDatabaseService.get_user_risk_profiles(user_data.get("username", ""))
         
@@ -549,7 +562,6 @@ INTERPRETATION EXAMPLES (do not echo in output)
         }
     except Exception as e:
         print(f"Error in risk_generation_node: {str(e)}")
-        import traceback
         traceback.print_exc()
         return {
             "output": f"I apologize, but I encountered an error while generating risks for your organization: {str(e)}. Please try again.",
@@ -559,74 +571,125 @@ INTERPRETATION EXAMPLES (do not echo in output)
             "preference_update_requested": False
         }
 
-# 4. Define the preference update node
 def risk_register_node(state: LLMState):
-    """Open the risk register, and when the user asks to find/filter risks,
-    perform semantic search via a LangGraph tool call (OpenAI model)."""
+    """
+    Open the risk register, and when the user asks to find/filter risks,
+    perform semantic search via a single LLM tool-calling flow. The LLM
+    will (1) decide whether to call the tool and (2) compose the final
+    natural-language reply from the tool results.
+    """
     print("Risk Register Node Activated")
     try:
         user_input = state["input"]
         conversation_history = state.get("conversation_history", []) or []
         risk_context = state.get("risk_context", {}) or {}
         user_data = state.get("user_data", {}) or {}
-        user_id = user_data.get("username", "")
+        user_id = user_data.get("username", "") or user_data.get("user_id", "") or ""
+
         model = get_llm()
 
         system_prompt = f"""
 You are the Risk Register assistant.
 
-- If the user is asking to **find/search/list/filter/sort** risks or anything that
-  requires looking up their previously **finalized risks**, you MUST call the tool
-  `semantic_risk_search` with:
-    - query: a concise reformulation of the user's ask
-    - user_id: "{user_id}"
-    - top_k: pick 5-10 based on query breadth (default 5)
+Your job is to help the user search, list, filter, or sort risks **from their finalized risk register**.
 
-- After you get tool results, respond with:
-  1) a short, clear natural-language summary (what you found and why it matches)
-- If the user only says things like “open my risk register” (no search),
-  DO NOT call the tool. Just acknowledge that the register is open and instruct
-  how to ask search queries naturally (e.g., “find cyber risks about ransomware”).
+TOOL USE:
+- If the user asks to **find/search/list/filter/sort** risks, you MUST call the tool `semantic_risk_search`.
+- Always include:
+  - query: a concise reformulation of the user's ask (defaults to the user's latest message if unspecified)
+  - user_id: "{user_id}" (use this value when missing)
+  - top_k: choose 5–10 based on query breadth (default 5)
+
+AFTER THE TOOL RETURNS:
+- Read the tool results and produce a clear, helpful natural-language response.
+- Summarize what was found and why it matches.
+- If results exist, present 3–5 best hits with key fields (e.g., category, description, department, owner) in a readable format.
+- If no results, suggest alternative terms/broader queries.
+- Do NOT dump raw JSON.
+
+IF NO SEARCH IS REQUESTED:
+- If the user only says things like "open my risk register", do NOT call the tool.
+- Briefly confirm it's open and explain how to ask search queries (e.g., “find cyber risks about ransomware”).
         """.strip()
 
         messages = [SystemMessage(content=system_prompt)]
         recent_history = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
-        for ex in recent_history:
-            if ex.get("user"):
-                messages.append(HumanMessage(content=ex["user"]))
-            if ex.get("assistant"):
-                messages.append(AIMessage(content=ex["assistant"]))
+        for turn in recent_history:
+            if turn.get("user"):
+                messages.append(HumanMessage(content=turn["user"]))
+            if turn.get("assistant"):
+                messages.append(AIMessage(content=turn["assistant"]))
 
         messages.append(HumanMessage(content=user_input))
 
-        agent = create_react_agent(
-            model=model,
-            tools=[semantic_risk_search],
-        )
+        bound = model.bind_tools([semantic_risk_search])
 
-        result = agent.invoke({"messages": messages})
+        max_steps = 3 
+        step = 0
+        final_ai_msg = None
 
-        final_text = ""
-        try:
-            msgs = result.get("messages", [])
-            if msgs:
-                last = msgs[-1]
-                final_text = getattr(last, "content", "") or ""
-                if isinstance(final_text, list):
-                    final_text = " ".join(
-                        [getattr(p, "content", p) for p in final_text if p]
+        while step < max_steps:
+            step += 1
+            ai_msg = bound.invoke(messages)
+            tool_calls = getattr(ai_msg, "tool_calls", None)
+
+            if not tool_calls:
+                final_ai_msg = ai_msg
+                break
+
+            tool_messages = []
+            for tc in tool_calls:
+                name = tc.get("name")
+                args = tc.get("args", {}) or {}
+                call_id = tc.get("id")
+
+                if name == "semantic_risk_search":
+                    args.setdefault("user_id", user_id)
+                    args.setdefault("top_k", 5)
+                    if not args.get("query"):
+                        args["query"] = user_input
+
+                    try:
+                        if hasattr(semantic_risk_search, "invoke"):
+                            tool_result = semantic_risk_search.invoke(args)
+                        else:
+                            tool_result = semantic_risk_search(**args)
+                    except Exception as tool_err:
+                        tool_result = {"error": f"semantic_risk_search failed: {tool_err}"}
+
+                    tool_messages.append(
+                        ToolMessage(
+                            tool_call_id=call_id,
+                            content=json.dumps(tool_result)
+                        )
                     )
-        except Exception:
-            pass
+                else:
+                    tool_messages.append(
+                        ToolMessage(
+                            tool_call_id=call_id,
+                            content=json.dumps({"error": f"Unknown tool '{name}'"})
+                        )
+                    )
 
-        if not final_text:
-            # Fallback to a simple open-register message when nothing returned
+            messages = messages + [ai_msg] + tool_messages
+
+        if final_ai_msg is None:
             final_text = (
                 "I’ve opened your risk register. You can ask me to search it, e.g., "
                 "“find cyber risks about ransomware” or “show data privacy risks with high impact.”"
             )
+        else:
+            if isinstance(final_ai_msg.content, str):
+                final_text = final_ai_msg.content.strip()
+            else:
+                try:
+                    final_text = "".join(
+                        block.get("text", "") if isinstance(block, dict) else str(block)
+                        for block in (final_ai_msg.content or [])
+                    ).strip()
+                except Exception:
+                    final_text = "Here’s what I found in your risk register."
 
-        # Update conversation history
         updated_history = conversation_history + [{"user": user_input, "assistant": final_text}]
 
         return {
@@ -636,7 +699,7 @@ You are the Risk Register assistant.
             "user_data": user_data,
             "risk_generation_requested": False,
             "preference_update_requested": False,
-            "risk_register_requested": False
+            "risk_register_requested": False,
         }
 
     except Exception as e:
@@ -653,8 +716,94 @@ You are the Risk Register assistant.
             "user_data": state.get("user_data", {}),
             "risk_generation_requested": False,
             "preference_update_requested": False,
-            "risk_register_requested": False
+            "risk_register_requested": False,
         }
+
+
+# def risk_register_node(state: LLMState):
+#     """
+#     Single-call tool-using node:
+#     - Let create_react_agent orchestrate tool calls + final answer.
+#     - No manual while-loop, no manual ToolMessage handling.
+#     """
+#     from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+#     from langgraph.prebuilt import create_react_agent
+
+#     print("Risk Register Node Activated")
+#     try:
+#         user_input = state["input"]
+#         conversation_history = state.get("conversation_history", []) or []
+#         risk_context = state.get("risk_context", {}) or {}
+#         user_data = state.get("user_data", {}) or {}
+#         user_id = user_data.get("username", "") or user_data.get("user_id", "") or ""
+
+#         model = get_llm()  # must support tool-calling
+
+#         system_prompt = f"""
+# You are the Risk Register assistant.
+
+# - If the user asks to find/search/list/filter/sort risks from their finalized register,
+#   call the tool `semantic_risk_search` with:
+#     - query: a concise reformulation of the user's ask (fallback: latest user message)
+#     - user_id: "{user_id}"
+#     - top_k: 5–10 (default 5)
+
+# After tool returns:
+# - Write a concise, helpful summary using the results (no raw JSON).
+# - If no results, suggest better queries.
+# If the user just asks to open the register (no search), don't call the tool—just explain how to search.
+# """.strip()
+
+#         # Build short memory
+#         messages = [SystemMessage(content=system_prompt)]
+#         for turn in (conversation_history[-5:] if len(conversation_history) > 5 else conversation_history):
+#             if turn.get("user"):
+#                 messages.append(HumanMessage(content=turn["user"]))
+#             if turn.get("assistant"):
+#                 messages.append(AIMessage(content=turn["assistant"]))
+#         messages.append(HumanMessage(content=user_input))
+
+#         # Prebuilt agent handles the internal loop automatically
+#         agent = create_react_agent(
+#             model=model,                # you may also do: model.bind_tools([semantic_risk_search])
+#             tools=[semantic_risk_search]
+#             # recursion_limit=3,         # optional safety cap (see docs)
+#         )
+
+#         result = agent.invoke({"messages": messages})
+#         final_msg = result["messages"][-1]
+#         final_text = getattr(final_msg, "content", getattr(final_msg, "text", "")) or (
+#             "I’ve opened your risk register. Ask me something like “find high-impact third-party risks.”"
+#         )
+
+#         updated_history = conversation_history + [{"user": user_input, "assistant": final_text}]
+#         return {
+#             "output": final_text,
+#             "conversation_history": updated_history,
+#             "risk_context": risk_context,
+#             "user_data": user_data,
+#             "risk_generation_requested": False,
+#             "preference_update_requested": False,
+#             "risk_register_requested": False,
+#         }
+
+#     except Exception:
+#         error_response = (
+#             "I’ve opened your risk register. You can ask me to search it, e.g., "
+#             "“find cyber risks about ransomware.”"
+#         )
+#         return {
+#             "output": error_response,
+#             "conversation_history": (state.get("conversation_history", []) or []) + [
+#                 {"user": state.get("input", ""), "assistant": error_response}
+#             ],
+#             "risk_context": state.get("risk_context", {}),
+#             "user_data": state.get("user_data", {}),
+#             "risk_generation_requested": False,
+#             "preference_update_requested": False,
+#             "risk_register_requested": False,
+#         }
+
 
 def preference_update_node(state: LLMState):
     """Handle user preference updates for risk profiles"""
@@ -668,9 +817,6 @@ def preference_update_node(state: LLMState):
         # Get username from user_data (assuming it's passed from main.py)
         username = user_data.get("username", "")
         
-        # Get user's current risk profiles
-        from database import RiskProfileDatabaseService
-        # Synchronously retrieve risk profiles
         result = RiskProfileDatabaseService.get_user_risk_profiles(username)
 
         if not result.success or not result.data or not result.data.get("profiles"):
@@ -889,7 +1035,6 @@ def matrix_recommendation_node(state: LLMState):
         existing_risk_categories = []
         username = user_data.get("username", "")
         if username:
-            from database import RiskProfileDatabaseService
             profiles_result = RiskProfileDatabaseService.get_user_risk_profiles(username)
             if profiles_result.success and profiles_result.data and profiles_result.data.get("profiles"):
                 existing_profiles = profiles_result.data.get("profiles", [])
@@ -1118,7 +1263,7 @@ IMPORTANT:
 
     except Exception as e:
         print(f"Error in matrix_recommendation_node: {str(e)}")
-        import traceback; traceback.print_exc()
+        traceback.print_exc()
         return {
             "output": f"I apologize, but I encountered an error while creating the matrix recommendation: {str(e)}. I'll create a standard {state.get('matrix_size', '5x5')} framework for you instead.",
             "conversation_history": state.get("conversation_history", []),

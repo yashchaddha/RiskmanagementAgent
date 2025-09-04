@@ -1,5 +1,6 @@
 import os
 import time
+import json
 from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
@@ -8,6 +9,9 @@ from pymilvus import (
     FieldSchema, CollectionSchema, DataType, Collection
 )
 from langchain_openai import OpenAIEmbeddings
+from openai import OpenAI
+
+from dependencies import get_llm
 
 load_dotenv()
 
@@ -15,6 +19,8 @@ ZILLIZ_URI = os.getenv("ZILLIZ_URI")
 ZILLIZ_TOKEN = os.getenv("ZILLIZ_TOKEN")
 ZILLIZ_DB = os.getenv("ZILLIZ_DB", "default")
 COLLECTION_NAME = "finalized_risks_index"
+COLLECTION_VERSION = "v2"  # Increment when schema changes
+VERSIONED_COLLECTION_NAME = f"{COLLECTION_NAME}_{COLLECTION_VERSION}"
 EMBED_DIM = 1536  # text-embedding-3-small
 
 def _connect():
@@ -51,9 +57,18 @@ def _ensure_collection() -> Collection:
             FieldSchema(name="location", dtype=DataType.VARCHAR, max_length=128),
             FieldSchema(name="domain", dtype=DataType.VARCHAR, max_length=128),
             FieldSchema(name="category", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="description", dtype=DataType.VARCHAR, max_length=8192),
+            FieldSchema(name="likelihood", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="impact", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="treatment_strategy", dtype=DataType.VARCHAR, max_length=8192),
             FieldSchema(name="department", dtype=DataType.VARCHAR, max_length=128),
             FieldSchema(name="risk_owner", dtype=DataType.VARCHAR, max_length=128),
-            FieldSchema(name="risk_text", dtype=DataType.VARCHAR, max_length=4096),
+            FieldSchema(name="asset_value", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="security_impact", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="target_date", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="risk_progress", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="residual_exposure", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="risk_text", dtype=DataType.VARCHAR, max_length=8192),
             FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBED_DIM),
             FieldSchema(name="created_at", dtype=DataType.INT64),
             FieldSchema(name="updated_at", dtype=DataType.INT64),
@@ -85,25 +100,131 @@ def _get_embedder():
     # keep it isolated so we can swap later if needed
     return OpenAIEmbeddings(model="text-embedding-3-small", api_key=os.getenv("OPENAI_API_KEY"))
 
+def _truncate_field(value: str, max_length: int) -> str:
+    """Truncate a string field to the specified max length"""
+    if not value:
+        return ""
+    value_str = str(value)
+    if len(value_str) <= max_length:
+        return value_str
+    # Truncate and add ellipsis
+    return value_str[:max_length-3] + "..."
+
 def _compose_sentence(
     risk: Dict[str, Any],
     organization_name: str,
     location: str,
     domain: str
 ) -> str:
-    # Compose ONE canonical sentence with everything useful
-    def _v(x): return x if (x is not None and x != "") else "-"
-    return (
-        f"{_v(organization_name)} in {_v(location)} ({_v(domain)}) — "
-        f"Category: {_v(risk.get('category'))}. "
-        f"Risk: {_v(risk.get('description'))}. "
-        f"Likelihood: {_v(risk.get('likelihood'))}; Impact: {_v(risk.get('impact'))}. "
-        f"Treatment: {_v(risk.get('treatment_strategy'))}. "
-        f"Asset value: {_v(risk.get('asset_value'))}; Dept: {_v(risk.get('department'))}; "
-        f"Owner: {_v(risk.get('risk_owner'))}; Security impact: {_v(risk.get('security_impact'))}; "
-        f"Target date: {_v(risk.get('target_date'))}; Progress: {_v(risk.get('risk_progress'))}; "
-        f"Residual exposure: {_v(risk.get('residual_exposure'))}."
-    )
+    """Convert risk JSON to a comprehensive natural language paragraph using LLM"""
+    def _v(x): 
+        return str(x).strip() if (x is not None and str(x).strip() != "" and str(x).strip() != "None") else None
+
+    try:
+        llm = get_llm()
+
+        # Prepare comprehensive risk data payload
+        payload = {
+            "organization_name": _v(organization_name),
+            "location": _v(location),
+            "domain": _v(domain),
+            "description": _v(risk.get("description")),
+            "category": _v(risk.get("category")),
+            "likelihood": _v(risk.get("likelihood")),
+            "impact": _v(risk.get("impact")),
+            "treatment_strategy": _v(risk.get("treatment_strategy")),
+            "department": _v(risk.get("department")),
+            "risk_owner": _v(risk.get("risk_owner")),
+            "asset_value": _v(risk.get("asset_value")),
+            "security_impact": _v(risk.get("security_impact")),
+            "target_date": _v(risk.get("target_date")),
+            "risk_progress": _v(risk.get("risk_progress")),
+            "residual_exposure": _v(risk.get("residual_exposure")),
+        }
+
+        # Filter out None values for cleaner prompt
+        filtered_payload = {k: v for k, v in payload.items() if v is not None}
+
+        # Enhanced LLM prompt for comprehensive paragraph generation
+        user_prompt = f"""
+Convert the following risk data into a comprehensive, natural language paragraph suitable for semantic search. 
+
+Requirements:
+- Write a detailed 2-3 sentence paragraph that captures all the key risk information
+- Use natural, flowing language that would be easy to search semantically
+- Include organization context, risk details, and mitigation information
+- Do not use bullet points or structured formats
+- Make it sound like a professional risk assessment description
+
+Risk Data:
+{json.dumps(filtered_payload, indent=2, ensure_ascii=False)}
+
+Write only the paragraph, no other text or formatting:
+"""
+
+        resp = llm.invoke([
+            {"role": "system", "content": "You are a professional risk management expert who writes comprehensive, searchable risk descriptions. Create detailed paragraphs that capture all relevant risk information in natural language."},
+            {"role": "user", "content": user_prompt}
+        ])
+        
+        text = (resp.content or "").strip()
+        # Clean up the text - remove extra whitespace and ensure proper sentence ending
+        text = " ".join(text.split())
+        if text and not text.endswith((".", "!", "?")):
+            text += "."
+        
+        if text:
+            return text
+            
+    except Exception as e:
+        print(f"Error in LLM-based sentence composition: {e}")
+        # Fallback to structured format if LLM fails
+        pass
+    
+    # Enhanced fallback format with all attributes
+    parts = []
+    if _v(organization_name):
+        parts.append(f"{_v(organization_name)}")
+    if _v(location):
+        parts.append(f"located in {_v(location)}")
+    if _v(domain):
+        parts.append(f"operating in {_v(domain)} domain")
+    
+    org_context = ", ".join(parts) if parts else "Organization"
+    
+    risk_desc = _v(risk.get("description")) or "Unspecified risk"
+    category = _v(risk.get("category")) or "General"
+    likelihood = _v(risk.get("likelihood")) or "Unknown"
+    impact = _v(risk.get("impact")) or "Unknown"
+    
+    paragraph = f"{org_context} faces a {category.lower()} risk: {risk_desc}. This risk has a {likelihood.lower()} likelihood of occurrence with {impact.lower()} potential impact."
+    
+    # Add treatment strategy if available
+    treatment = _v(risk.get("treatment_strategy"))
+    if treatment:
+        paragraph += f" The planned treatment strategy involves {treatment.lower()}."
+    
+    # Add additional details if available
+    details = []
+    if _v(risk.get("department")):
+        details.append(f"managed by {_v(risk.get('department'))} department")
+    if _v(risk.get("risk_owner")):
+        details.append(f"owned by {_v(risk.get('risk_owner'))}")
+    if _v(risk.get("asset_value")):
+        details.append(f"affecting assets valued at {_v(risk.get('asset_value'))}")
+    if _v(risk.get("security_impact")) and _v(risk.get("security_impact")).lower() == "yes":
+        details.append("with security implications")
+    if _v(risk.get("target_date")):
+        details.append(f"targeted for completion by {_v(risk.get('target_date'))}")
+    if _v(risk.get("risk_progress")):
+        details.append(f"currently in {_v(risk.get('risk_progress')).lower()} status")
+    if _v(risk.get("residual_exposure")):
+        details.append(f"with {_v(risk.get('residual_exposure')).lower()} residual exposure")
+    
+    if details:
+        paragraph += f" This risk is {', '.join(details)}."
+    
+    return paragraph
 
 class VectorIndexService:
     @staticmethod
@@ -124,27 +245,46 @@ class VectorIndexService:
         collection = _ensure_collection()
         embedder = _get_embedder()
 
-        # Prepare payloads
+        # Prepare payloads with all risk attributes
         now = int(time.time() * 1000)
         risk_ids = []
         user_ids = []
         orgs, locs, doms = [], [], []
-        cats, depts, owners = [], [], []
+        cats, descs, likelihoods, impacts, treatments = [], [], [], [], []
+        depts, owners, asset_vals = [], [], []
+        security_impacts, target_dates, progresses, residual_exposures = [], [], [], []
         texts = []
 
         for r in risks:
             rid = str(r.get("_id", ""))  # ObjectId -> str
             risk_ids.append(rid)
-            user_ids.append(user_id)
-            orgs.append(organization_name or "")
-            locs.append(location or "")
-            doms.append(domain or "")
-            cats.append(r.get("category", "") or "")
-            depts.append(r.get("department", "") or "")
-            owners.append(r.get("risk_owner", "") or "")
-            texts.append(_compose_sentence(r, organization_name, location, domain))
+            user_ids.append(_truncate_field(user_id, 128))
+            orgs.append(_truncate_field(organization_name or "", 256))
+            locs.append(_truncate_field(location or "", 128))
+            doms.append(_truncate_field(domain or "", 128))
+            
+            # Core risk attributes with truncation
+            cats.append(_truncate_field(r.get("category", "") or "", 128))
+            descs.append(_truncate_field(r.get("description", "") or "", 1024))
+            likelihoods.append(_truncate_field(r.get("likelihood", "") or "", 128))
+            impacts.append(_truncate_field(r.get("impact", "") or "", 128))
+            treatments.append(_truncate_field(r.get("treatment_strategy", "") or "", 8192))
+            
+            # Additional risk attributes with truncation
+            depts.append(_truncate_field(r.get("department", "") or "", 128))
+            owners.append(_truncate_field(r.get("risk_owner", "") or "", 128))
+            asset_vals.append(_truncate_field(r.get("asset_value", "") or "", 128))
+            security_impacts.append(_truncate_field(r.get("security_impact", "") or "", 128))
+            target_dates.append(_truncate_field(r.get("target_date", "") or "", 128))
+            progresses.append(_truncate_field(r.get("risk_progress", "") or "", 128))
+            residual_exposures.append(_truncate_field(r.get("residual_exposure", "") or "", 128))
+            
+            # Generate comprehensive natural language paragraph using LLM
+            # Don't truncate risk_text as it's used for semantic search
+            risk_text = _compose_sentence(r, organization_name, location, domain)
+            texts.append(risk_text)
 
-        # Embed in batch
+        # Embed in batch the generated natural language paragraphs
         vectors = embedder.embed_documents(texts)
 
         # Milvus has no native "upsert" on all versions; emulate by delete-then-insert by PK
@@ -154,9 +294,12 @@ class VectorIndexService:
         except Exception:
             pass  # ok if nothing to delete
 
+        # Insert data with all attributes
         data = [
             risk_ids, user_ids, orgs, locs, doms,
-            cats, depts, owners, texts, vectors,
+            cats, descs, likelihoods, impacts, treatments,
+            depts, owners, asset_vals, security_impacts, target_dates,
+            progresses, residual_exposures, texts, vectors,
             [now]*len(risk_ids), [now]*len(risk_ids)
         ]
         collection.insert(data)
@@ -174,7 +317,8 @@ class VectorIndexService:
     def _build_filter_expr(user_id: str, filters: Dict[str, Any]) -> str:
         # Always scope by user_id
         clauses = [f"user_id == '{user_id}'"]
-        # Optional scalars
+        
+        # Optional scalar filters
         if filters.get("location"):
             clauses.append(f"location == '{filters['location']}'")
         if filters.get("domain"):
@@ -183,12 +327,27 @@ class VectorIndexService:
             clauses.append(f"department == '{filters['department']}'")
         if filters.get("risk_owner"):
             clauses.append(f"risk_owner == '{filters['risk_owner']}'")
+        if filters.get("likelihood"):
+            clauses.append(f"likelihood == '{filters['likelihood']}'")
+        if filters.get("impact"):
+            clauses.append(f"impact == '{filters['impact']}'")
+        if filters.get("security_impact"):
+            clauses.append(f"security_impact == '{filters['security_impact']}'")
+        if filters.get("risk_progress"):
+            clauses.append(f"risk_progress == '{filters['risk_progress']}'")
+        if filters.get("residual_exposure"):
+            clauses.append(f"residual_exposure == '{filters['residual_exposure']}'")
+            
+        # Category filter (can be a list)
         if filters.get("category"):
             cats = filters["category"]
             if isinstance(cats, list) and cats:
                 # e.g. category in ["Operational","Legal and Compliance"]
                 values = ",".join([f"'{c}'" for c in cats])
                 clauses.append(f"category in [{values}]")
+            elif isinstance(cats, str):
+                clauses.append(f"category == '{cats}'")
+                
         # Date ranges are stored only as ints; if you later persist per-risk timestamps,
         # add them here (created_at/updated_at >=/<=).
         return " && ".join(clauses)
@@ -237,11 +396,13 @@ class VectorIndexService:
             expr=expr,
             output_fields=[
                 "risk_id", "user_id", "organization_name", "location", "domain",
-                "category", "department", "risk_owner", "risk_text"
+                "category", "description", "likelihood", "impact", "treatment_strategy",
+                "department", "risk_owner", "asset_value", "security_impact", 
+                "target_date", "risk_progress", "residual_exposure", "risk_text"
             ],
         )
 
-        # Flatten results
+        # Flatten results with all risk attributes
         hits = []
         for hit in (res[0] if res else []):
             hits.append({
@@ -251,8 +412,17 @@ class VectorIndexService:
                 "location": hit.entity.get("location"),
                 "domain": hit.entity.get("domain"),
                 "category": hit.entity.get("category"),
+                "description": hit.entity.get("description"),
+                "likelihood": hit.entity.get("likelihood"),
+                "impact": hit.entity.get("impact"),
+                "treatment_strategy": hit.entity.get("treatment_strategy"),
                 "department": hit.entity.get("department"),
                 "risk_owner": hit.entity.get("risk_owner"),
+                "asset_value": hit.entity.get("asset_value"),
+                "security_impact": hit.entity.get("security_impact"),
+                "target_date": hit.entity.get("target_date"),
+                "risk_progress": hit.entity.get("risk_progress"),
+                "residual_exposure": hit.entity.get("residual_exposure"),
                 "risk_text": hit.entity.get("risk_text"),
             })
 
