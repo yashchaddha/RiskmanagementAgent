@@ -1,7 +1,4 @@
 import os
-import json
-import traceback
-from datetime import datetime
 from dotenv import load_dotenv
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
@@ -14,10 +11,9 @@ from rag_tools import semantic_risk_search
 from typing_extensions import TypedDict
 from typing import List, Dict, Any
 from dependencies import get_llm
+import json
 from knowledge_base import ISO_27001_KNOWLEDGE
 from langsmith import traceable
-import uuid
-from database import ControlsDatabaseService
 
 # Load environment variables from .env
 load_dotenv()
@@ -117,78 +113,6 @@ def semantic_risk_search(query: str, user_id: str, top_k: int = 5) -> dict:
     except Exception as e:
         return {"hits": [], "count": 0, "error": str(e), "query": query, "user_id": user_id}
 
-@tool("semantic_control_search")
-def semantic_control_search(query: str, user_id: str, top_k: int = 5) -> dict:
-    """
-    Semantically search the user's controls stored in Zilliz/Milvus.
-    Returns a JSON payload of the top matches (with scores) filtered by user_id.
-
-    Args:
-        query: Free-text user query about controls.
-        user_id: Tenant scoping (strictly filter to this user).
-        top_k: Number of results to return.
-    """
-    try:
-        emb = OpenAIEmbeddings(model="text-embedding-3-small")
-        query_vec: List[float] = emb.embed_query(query)
-        client = MilvusClient(
-            uri=os.getenv("ZILLIZ_URI"),
-            token=os.getenv("ZILLIZ_TOKEN"),
-            secure=True
-        )
-
-        OUTPUT_FIELDS = [
-            "control_id", "control_title", "control_description", "annexA_map", "linked_risk_ids", "owner_role", "process_steps", "evidence_samples", "metrics", "frequency", "policy_ref", "status", "rationale", "assumptions", "user_id", "created_at", "updated_at"
-        ]
-
-        results = client.search(
-            collection_name="controls_index",
-            data=[query_vec],
-            anns_field="embedding",
-            limit=top_k,
-            output_fields=OUTPUT_FIELDS,
-            filter=f"user_id == '{user_id}'"
-        )
-
-        hits: List[Dict[str, Any]] = []
-        if results and len(results) > 0:
-            for hit in results[0]:
-                entity = hit.get("entity", {}) if isinstance(hit, dict) else getattr(hit, "entity", {})
-                score = hit.get("score", None) if isinstance(hit, dict) else getattr(hit, "score", None)
-                try:
-                    score = float(score) if score is not None else None
-                except Exception:
-                    pass
-
-                hits.append({
-                    "control_id": entity.get("control_id"),
-                    "control_title": entity.get("control_title"),
-                    "control_description": entity.get("control_description"),
-                    "annexA_map": entity.get("annexA_map"),
-                    "linked_risk_ids": entity.get("linked_risk_ids"),
-                    "owner_role": entity.get("owner_role"),
-                    "process_steps": entity.get("process_steps"),
-                    "evidence_samples": entity.get("evidence_samples"),
-                    "metrics": entity.get("metrics"),
-                    "frequency": entity.get("frequency"),
-                    "policy_ref": entity.get("policy_ref"),
-                    "status": entity.get("status"),
-                    "rationale": entity.get("rationale"),
-                    "assumptions": entity.get("assumptions"),
-                    "user_id": entity.get("user_id"),
-                    "created_at": entity.get("created_at"),
-                    "updated_at": entity.get("updated_at"),
-                })
-
-        return {
-            "hits": hits,
-            "count": len(hits),
-            "query": query,
-            "user_id": user_id
-        }
-
-    except Exception as e:
-        return {"hits": [], "count": 0, "error": str(e), "query": query, "user_id": user_id}
 
 # 1. Define the state schema
 class LLMState(TypedDict):
@@ -204,1076 +128,273 @@ class LLMState(TypedDict):
     matrix_recommendation_requested: bool  # Flag to indicate if matrix recommendation is needed
     is_audit_related: bool  # Flag to indicate if query is audit-related
     is_risk_related: bool  # Flag to indicate if query is risk-related
-    is_control_related: bool
-    is_knowledge_related: bool
-    control_generation_requested: bool
-    control_parameters: dict
-    control_retrieved_context: dict
-    generated_controls: list
-    selected_controls: list
-    pending_selection: bool
-    control_session_id: str
 
-    # New control-routing helpers
-    control_target: str  # one of: generate_control_node | control_library_node | control_knowledge_node
-    control_query: str
-    control_filters: dict
-    risk_description: str
-
-# 2. Define the control node
-@traceable(project_name=LANGSMITH_PROJECT_NAME, name="control_node")
-def control_node(state: LLMState) -> LLMState:
-    """
-    Conversational control intent classifier that routes to appropriate control sub-domain
-    """
-    print("Control Node Activated")
-    
-    user_input = state.get("input", "").strip()
-    conversation_history = state.get("conversation_history", [])
-    user_data = state.get("user_data", {})
-    
-    # Industry-standard prompt for control domain classification
-    system_prompt = """# Control Management Assistant - Sub-Domain Classification
-
-## Role
-You are a conversational classifier within the Control Management domain. Your job is to understand user intent and either route to the appropriate control sub-domain or ask clarifying questions.
-
-## Available Control Sub-Domains
-1. **generate_control**: Creating new security controls for risks or requirements
-2. **control_library**: Searching, viewing, and managing user's existing saved controls
-3. **control_knowledge**: Educational information about control types, frameworks, and concepts
-
-## Task
-Analyze the user's query and determine the most appropriate action using semantic understanding.
-
-## Decision Process
-1. **Intent Analysis**: What is the user trying to accomplish?
-   - **Creation/Generation**: "generate", "create", "develop", "design" controls
-   - **Personal Data Access**: "show MY", "list MY", "find MY", "search MY" controls  
-   - **Educational/Conceptual**: "what are", "explain", "tell me about", "how do" controls work
-
-2. **Confidence Assessment**: Rate confidence (0.0-1.0) in understanding intent
-
-3. **Action Decision**:
-   - Confidence >= 0.8: Route to sub-domain
-   - Confidence < 0.8: Ask clarifying questions
-
-## Output Format
-```json
-{
-  "action": "route" | "clarify",
-  "sub_domain": "generate_control" | "control_library" | "control_knowledge" | null,
-  "confidence": 0.0-1.0,
-  "reasoning": "Brief explanation of understanding",
-  "clarifying_question": "Question for user (only when action is 'clarify')",
-  "parameters": {
-    "mode": "all" | "category" | "risk_id" | "risk_description",
-    "risk_category": "string (if mode=category)",
-    "risk_id": "string (if mode=risk_id)",
-    "risk_description": "string (if mode=risk_description)"
-  }
-}
-```
-
-## Generation Mode Detection
-When routing to generate_control, analyze the user input to determine generation parameters:
-
-- **mode: "all"** - Generate controls for all user's risks
-  - "Generate controls for all my risks"
-  - "Create security controls for my organization"
-  
-- **mode: "category"** - Generate controls for specific risk category
-  - "Generate controls for financial risks" → risk_category: "Financial"
-  - "Create controls for cyber security risks" → risk_category: "Cyber Security"
-  - "I need controls for operational risks" → risk_category: "Operational"
-  
-- **mode: "risk_id"** - Generate controls for specific risk ID
-  - "Generate controls for risk R-001" → risk_id: "R-001"
-  - "Create controls for RISK-123" → risk_id: "RISK-123"
-  
-- **mode: "risk_description"** - Generate controls for described risk
-  - "Generate controls for data breach risk" → risk_description: "data breach risk"
-  - "Create controls for SQL injection vulnerability" → risk_description: "SQL injection vulnerability"
-
-## Common Risk Categories
-- Financial, Operational, Strategic, Compliance, Technology, Cyber Security, Data Privacy, 
-- Human Resources, Environmental, Legal, Reputational, Supply Chain
-
-## Classification Examples
-
-### Generation Intent (route to generate_control):
-- "Generate controls for financial risks" 
-  ```json
-  {
-    "action": "route",
-    "sub_domain": "generate_control",
-    "confidence": 0.9,
-    "reasoning": "Clear intent to generate controls for specific category",
-    "parameters": {"mode": "category", "risk_category": "Financial"}
-  }
-  ```
-
-- "Create controls for risk R-001"
-  ```json
-  {
-    "action": "route", 
-    "sub_domain": "generate_control",
-    "confidence": 0.95,
-    "reasoning": "Specific risk ID mentioned",
-    "parameters": {"mode": "risk_id", "risk_id": "R-001"}
-  }
-  ```
-
-- "I need controls for ransomware attacks"
-  ```json
-  {
-    "action": "route",
-    "sub_domain": "generate_control", 
-    "confidence": 0.85,
-    "reasoning": "Specific risk described",
-    "parameters": {"mode": "risk_description", "risk_description": "ransomware attacks"}
-  }
-  ```
-
-### Library Intent (route to control_library):
-- "Show me my existing controls"
-- "List controls I've saved" 
-- "Find controls for risk R-001"
-- "What controls do I have implemented?"
-- "Search my controls for encryption"
-- "Find controls related to A.9.2" (ISO 27001 Annex A reference)
-- "Show me controls for A.5.23"
-- "List my controls mapped to A.12.1"
-- "Search controls by annex reference"
-
-```json
-{
-  "action": "route",
-  "sub_domain": "control_library", 
-  "confidence": 0.9,
-  "reasoning": "User wants to search their saved controls for Annex A.9.2 references",
-  "parameters": {"annex_reference": "A.9.2"}
-}
-```
-
-### Knowledge Intent (route to control_knowledge):
-- "What are access controls?"
-- "Explain preventive vs detective controls"
-- "Tell me about NIST control framework"
-- "How do technical controls work?"
-- "What's the difference between administrative and physical controls?"
-- "How can I implement this control in my org?"
-- "How to implement regular health and safety audits?"
-- "What are the steps to deploy this control?"
-- "How do I operationalize control C-002?"
-- "Implementation guidance for infection control measures"
-
-```json
-{
-  "action": "route",
-  "sub_domain": "control_knowledge",
-  "confidence": 0.9,
-  "reasoning": "User asking for implementation guidance for a specific control",
-  "parameters": {"query_type": "implementation", "control_context": "health and safety audits"}
-}
-```
-
-### Clarification Examples:
-User: "I need help with controls"
-```json
-{
-  "action": "clarify",
-  "sub_domain": null,
-  "confidence": 0.3,
-  "reasoning": "Ambiguous - could be generation, library access, or educational need",
-  "clarifying_question": "I'm here to help with controls. Are you looking to: create new controls for specific risks, review controls you've already saved, or learn about different types of security controls?"
-}
-```
-
-User: "Show me controls for A.5.23"
-```json
-{
-  "action": "clarify", 
-  "sub_domain": null,
-  "confidence": 0.6,
-  "reasoning": "Could be asking for user's saved controls mapped to A.5.23 or general information about A.5.23 controls",
-  "clarifying_question": "For ISO 27001 A.5.23 controls - are you looking for controls you've created and saved that map to this annex, or do you want to learn about what A.5.23 covers in general?"
-}
-```
-
-## Key Semantic Patterns
-- **Personal Ownership Indicators**: "my", "our", "I have", "we created" → control_library
-- **Creation Language**: "generate", "create", "build", "develop", "design" → generate_control  
-- **Educational Language**: "what is", "explain", "how does", "tell me about" → control_knowledge
-- **Implementation Language**: "how can I implement", "how to deploy", "implementation steps", "operationalize", "how do I" → control_knowledge
-- **Search/Filter Language**: "show", "list", "find", "search" + context clues → library vs knowledge
-- **Annex A References**: "A.9.2", "A.5.23", "annex A" + search intent → control_library (NOT generate_control)
-- **Risk Categories**: "Financial", "Operational", "Cyber Security" + generate intent → generate_control
-- **Context References**: "this control", "that control", "the control we discussed" → use conversation context
-
-## Context Considerations
-- Use conversation history to understand previous context
-- Consider user's organizational role and needs
-- Reference prior work: "Based on the risks we identified earlier..."
-- Build understanding progressively through conversation
-"""
-
+# 2. Define the risk node
+def risk_node(state: LLMState):
+    print("Risk Node Activated")
     try:
-        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
+        llm = get_llm()
         
-        # Parse JSON response
-        content = response_content.strip()
-        if content.startswith("```json") and content.endswith("```"):
-            content = content[7:-3].strip()
-        elif content.startswith("```") and content.endswith("```"):
-            content = content[3:-3].strip()
-        
-        try:
-            result = json.loads(content)
-        except json.JSONDecodeError:
-            # Try to extract JSON from response
-            start = content.find('{')
-            end = content.rfind('}') + 1
-            if start != -1 and end > start:
-                result = json.loads(content[start:end])
-            else:
-                # Fallback
-                result = {
-                    "action": "clarify",
-                    "sub_domain": None,
-                    "confidence": 0.0,
-                    "reasoning": "Could not parse intent",
-                    "clarifying_question": "I'd like to help you with security controls. Could you tell me more about what you're trying to accomplish - are you looking to create new controls, review existing ones, or learn about control concepts?"
-                }
-        
-        action = result.get("action", "clarify")
-        sub_domain = result.get("sub_domain")
-        confidence = result.get("confidence", 0.0)
-        reasoning = result.get("reasoning", "")
-        clarifying_question = result.get("clarifying_question", "")
-        parameters = result.get("parameters", {})
-        
-        print(f"DEBUG: Control node - Action: {action}, Sub-domain: {sub_domain}, Confidence: {confidence}")
-        print(f"DEBUG: Control node - Reasoning: {reasoning}")
-        print(f"DEBUG: Control node - Parameters: {parameters}")
-        
-        # Set control-related flags
-        state["is_control_related"] = True
-        
-        # Handle routing decision
-        if action == "route" and sub_domain and confidence >= 0.8:
-            if sub_domain == "generate_control":
-                state["control_target"] = "generate_control_node"
-                state["control_generation_requested"] = True
-                
-                # Extract and set control parameters
-                control_params = {}
-                if parameters:
-                    control_params["mode"] = parameters.get("mode", "all")
-                    if "risk_category" in parameters:
-                        control_params["risk_category"] = parameters["risk_category"]
-                    if "risk_id" in parameters:
-                        control_params["risk_id"] = parameters["risk_id"]
-                    if "risk_description" in parameters:
-                        control_params["risk_description"] = parameters["risk_description"]
-                else:
-                    # Fallback parameter extraction from user input
-                    user_lower = user_input.lower()
-                    if "risk" in user_lower and any(cat.lower() in user_lower for cat in ["financial", "operational", "strategic", "compliance", "technology", "cyber", "data", "hr", "environmental", "legal", "reputational", "supply"]):
-                        control_params["mode"] = "category"
-                        # Extract category name
-                        for cat in ["financial", "operational", "strategic", "compliance", "technology", "cyber security", "data privacy", "human resources", "environmental", "legal", "reputational", "supply chain"]:
-                            if cat.lower() in user_lower:
-                                control_params["risk_category"] = cat.title()
-                                break
-                    elif "risk" in user_lower and ("r-" in user_lower or "risk-" in user_lower):
-                        control_params["mode"] = "risk_id"
-                        # Try to extract risk ID
-                        import re
-                        risk_id_match = re.search(r'(r-\d+|risk-\d+)', user_lower)
-                        if risk_id_match:
-                            control_params["risk_id"] = risk_id_match.group(1).upper()
-                    else:
-                        control_params["mode"] = "all"
-                
-                state["control_parameters"] = control_params
-                
-                # Also set risk_description in state if mode is risk_description
-                if control_params.get("mode") == "risk_description":
-                    state["risk_description"] = control_params.get("risk_description", "")
-                
-                print(f"DEBUG: Routing to generate_control_node with parameters: {control_params}")
-                return state
-            elif sub_domain == "control_library":
-                state["control_target"] = "control_library_node"
-                
-                # Extract and set search parameters for control library
-                control_params = {}
-                if parameters:
-                    # Don't pass mode for control_library searches - let the library node handle the query directly
-                    control_params = {k: v for k, v in parameters.items() if k not in ["mode", "risk_category"]}
-                    if "annex_reference" in parameters:
-                        control_params["annex_reference"] = parameters["annex_reference"]
-                else:
-                    # Check if user is asking about specific Annex A references
-                    user_lower = user_input.lower()
-                    import re
-                    annex_match = re.search(r'a\.?\s*(\d+)\.?\s*(\d+)?', user_lower)
-                    if annex_match:
-                        annex_ref = f"A.{annex_match.group(1)}"
-                        if annex_match.group(2):
-                            annex_ref += f".{annex_match.group(2)}"
-                        control_params["annex_reference"] = annex_ref
-                
-                state["control_parameters"] = control_params
-                print(f"DEBUG: Routing to control_library_node with parameters: {control_params}")
-                return state
-            elif sub_domain == "control_knowledge":
-                state["control_target"] = "control_knowledge_node"
-                
-                # Extract and set knowledge parameters
-                control_params = {}
-                if parameters:
-                    control_params = {k: v for k, v in parameters.items()}
-                else:
-                    # Check for implementation questions
-                    user_lower = user_input.lower()
-                    if any(word in user_lower for word in ["implement", "deploy", "operationalize", "how to", "how can i"]):
-                        control_params["query_type"] = "implementation"
-                        # Try to extract control context from conversation
-                        if "this control" in user_lower or "the control" in user_lower:
-                            control_params["has_context"] = True
-                
-                state["control_parameters"] = control_params
-                print(f"DEBUG: Routing to control_knowledge_node with parameters: {control_params}")
-                return state
-        
-        # Ask clarifying question
-        if not clarifying_question:
-            clarifying_question = "I'm here to help with security controls. Are you looking to create new controls, review existing ones you've saved, or learn about control frameworks and concepts?"
-        
-        # Update conversation history and return response
-        updated_history = conversation_history + [
-            {"user": user_input, "assistant": clarifying_question}
-        ]
-        
-        return {
-            **state,
-            "output": clarifying_question,
-            "conversation_history": updated_history,
-            "control_target": "clarify"  # Indicate we're in clarification mode
-        }
-        
-    except Exception as e:
-        print(f"Error in control_node: {str(e)}")
-        error_response = "I want to help you with security controls, but I need to understand your specific need. Are you looking to create new controls, manage existing ones, or learn about control concepts?"
-        
-        updated_history = conversation_history + [
-            {"user": user_input, "assistant": error_response}
-        ]
-        
-        return {
-            **state,
-            "output": error_response, 
-            "conversation_history": updated_history,
-            "is_control_related": True,
-            "control_target": "clarify"
-        }
-
-
-def route_control_three_way(state: LLMState) -> str:
-    """
-    Fixed three-way routing function that properly handles all control sub-domains
-    """
-    control_target = state.get("control_target", "control_library_node")
-    
-    print(f"DEBUG: Control three-way routing - target: {control_target}")
-    
-    # Handle clarification state - stay in control node for another round
-    if control_target == "clarify":
-        return "control_node"
-    
-    # Route to appropriate sub-domain
-    if control_target == "generate_control_node":
-        return "generate_control_node"
-    elif control_target == "control_knowledge_node":
-        return "control_knowledge_node"
-    elif control_target == "control_library_node":
-        return "control_library_node"
-    
-    # Default fallback
-    print(f"DEBUG: Unknown control target '{control_target}', defaulting to control_library_node")
-    return "control_library_node"
-@traceable(project_name=LANGSMITH_PROJECT_NAME, name="generate_control_node")
-def control_generate_node(state: LLMState) -> LLMState:
-    """
-    Generate controls using direct LLM calls with conversation history
-    """
-    print("Control Generate Node Activated")
-    
-    conversation_history = state.get("conversation_history", [])
-    user_data = state.get("user_data", {})
-    user_id = user_data.get("username") or user_data.get("user_id") or ""
-    params = state.get("control_parameters", {}) or {}
-    mode = params.get("mode", "all")
-
-    all_controls = []
-
-    try:
-        risks = []
-        from vector_index import VectorIndexService
-
-        if mode == "risk_id":
-            rid = params.get("risk_id", "")
-            if rid:
-                r = ControlsDatabaseService.get_risk_by_id(rid, user_id)
-                if r:
-                    risks = [r]
-        elif mode == "risk_description":
-            desc = (state.get("risk_description") or "").strip()
-            if desc:
-                sr = VectorIndexService.search(user_id=user_id, query=desc, top_k=1, filters={})
-                hits = sr.get("results", [])
-                if hits:
-                    h = hits[0]
-                    risk_text = h.get("risk_text", "")
-                    description = risk_text.split("Risk: ")[-1].split(". Likelihood:")[0] if "Risk: " in risk_text else risk_text
-                    risks = [{
-                        "id": h.get("risk_id"),
-                        "description": description,
-                        "category": h.get("category"),
-                        "likelihood": "Medium",
-                        "impact": "Medium",
-                        "treatment_strategy": "",
-                        "user_id": user_id
-                    }]
-                else:
-                    risks = [{
-                        "id": "",
-                        "description": desc,
-                        "category": "Technology",
-                        "likelihood": "Medium",
-                        "impact": "Medium",
-                        "treatment_strategy": "",
-                        "user_id": user_id
-                    }]
-        elif mode == "category":
-            target_cat = (params.get("risk_category") or "").strip()
-            # Try semantic search first
-            sr = VectorIndexService.search(
-                user_id=user_id,
-                query=(target_cat + " risks mitigation") if target_cat else state.get("input", "relevant risks"),
-                top_k=50,
-                filters={},
-            )
-            hits = sr.get("results", [])
-            for h in hits:
-                hcat = str(h.get("category", ""))
-                if target_cat and hcat.lower() != target_cat.lower():
-                    continue
-                risk_text = h.get("risk_text", "")
-                description = risk_text.split("Risk: ")[-1].split(". Likelihood:")[0] if "Risk: " in risk_text else risk_text
-                risks.append({
-                    "id": h.get("risk_id"),
-                    "description": description,
-                    "category": hcat,
-                    "likelihood": "Medium",
-                    "impact": "Medium",
-                    "treatment_strategy": "",
-                    "user_id": user_id,
-                })
-            if not risks:
-                all_risks = ControlsDatabaseService.get_user_risks(user_id)
-                risks = [r for r in all_risks if str(r.get("category", "")).lower() == target_cat.lower()] if target_cat else all_risks
-        else:
-            sr = VectorIndexService.search(user_id=user_id, query="all risks security controls mitigation", top_k=50, filters={})
-            hits = sr.get("results", [])
-            for h in hits:
-                risk_text = h.get("risk_text", "")
-                description = risk_text.split("Risk: ")[-1].split(". Likelihood:")[0] if "Risk: " in risk_text else risk_text
-                risks.append({
-                    "id": h.get("risk_id"),
-                    "description": description,
-                    "category": h.get("category"),
-                    "likelihood": "Medium",
-                    "impact": "Medium",
-                    "treatment_strategy": "",
-                    "user_id": user_id
-                })
-            if not risks:
-                risks = ControlsDatabaseService.get_user_risks(user_id)
-
-        print(f"DEBUG: control_generate_node - generating for {len(risks)} risk(s)")
-
-        for r in risks:
-            controls = generate_controls_for_risk(r, user_data, conversation_history)
-            link_risk = not (mode == "risk_description" and r.get("id", "") == "")
-            for c in controls:
-                if link_risk and r.get("id"):
-                    # Ensure linked_risk_ids is a list and add the risk ID
-                    if "linked_risk_ids" not in c:
-                        c["linked_risk_ids"] = []
-                    if r.get("id") not in c["linked_risk_ids"]:
-                        c["linked_risk_ids"].append(r.get("id"))
-                c["user_id"] = user_id
-                c["id"] = str(uuid.uuid4())
-            if controls:
-                # Do not save here; return to frontend for selection
-                all_controls.extend(controls)
-
-        # Return generated controls for popup; frontend will save selected ones
-        rc = state.get("risk_context", {}) or {}
-        rc["generated_controls"] = all_controls
-        state["risk_context"] = rc
-        state["generated_controls"] = all_controls
-        state["output"] = (f"Generated {len(all_controls)} controls. "
-                            f"Please select controls to save via the control API.")
-        return state
-    except Exception as e:
-        state["output"] = f"Error generating controls: {str(e)}"
-        return state
-
-@traceable(project_name=LANGSMITH_PROJECT_NAME, name="control_library_node")
-def control_library_node(state: LLMState) -> LLMState:
-    """Conversational control library assistant for searching and managing user's controls"""
-    print("Control Library Node Activated")
-    
-    user_input = state.get("input", "")
-    user_data = state.get("user_data", {})
-    conversation_history = state.get("conversation_history", [])
-    control_parameters = state.get("control_parameters", {})
-    user_id = user_data.get("username") or user_data.get("user_id") or ""
-    model = get_llm()
-    
-    # Check if we have specific Annex A reference parameters
-    search_query = user_input
-    if control_parameters.get("annex_reference"):
-        annex_ref = control_parameters["annex_reference"]
-        search_query = f"controls related to ISO 27001 Annex {annex_ref} {user_input}"
-        print(f"DEBUG: Enhanced search query for Annex reference: {search_query}")
-    search_intent_prompt = f"""You are the Control Library assistant.
-
-- If the user is asking to **find/search/list/filter/sort** controls or anything that
-  requires looking up their previously **finalized controls**, you MUST call the tool
-  `semantic_control_search` with:
-    - query: "{search_query}"
-    - user_id: "{user_id}"
-    - top_k: pick 5-10 based on query breadth (default 5)
-
-- If the query is related to both controls and risks, you must call both tools:
-  - `semantic_control_search` for controls. You will find the risk mongodb Ids in the control metadata.
-  - `semantic_risk_search` for risks
-
-- After you get tool results, respond with:
-  1) a short, clear natural-language summary (what you found and why it matches)
-- If the user only says things like “open my risk register” (no search),
-  DO NOT call the tool. Just acknowledge that the register is open and instruct
-  how to ask search queries naturally (e.g., “find cyber risks about ransomware”).
-"""
-
-    try:
-        messages = [SystemMessage(content=search_intent_prompt)]
-        recent_history = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
-        for ex in recent_history:
-            if ex.get("user"):
-                messages.append(HumanMessage(content=ex["user"]))
-            if ex.get("assistant"):
-                messages.append(AIMessage(content=ex["assistant"]))
-
-        messages.append(HumanMessage(content=user_input))
-        agent = create_react_agent(
-            model=model,
-            tools=[semantic_control_search, semantic_risk_search],
-        )
-        result = agent.invoke({"messages": messages})
-        final_text = ""
-        try:
-            msgs = result.get("messages", [])
-            if msgs:
-                last = msgs[-1]
-                final_text = getattr(last, "content", "") or ""
-                if isinstance(final_text, list):
-                    final_text = " ".join(
-                        [getattr(p, "content", p) for p in final_text if p]
-                    )
-        except Exception:
-            pass
-
-        if not final_text:
-            final_text = (
-                "I've opened your control library. You can ask me to search it, e.g., "
-                "“find controls related to cybersecurity” or “show data privacy controls.”"
-            )
-        updated_history = conversation_history + [{"user": user_input, "assistant": final_text}]
-
-        return {
-            "output": final_text,
-            "conversation_history": updated_history,
-            "user_data": user_data
-        }
-
-    except Exception as e:
-        print(f"Intent parsing failed: {e}")
-        error_response = (
-            "I understand you want to access your control library. I’ve opened it. "
-            "You can ask me to search it (e.g., “find me cybersecurity controls”)."
-        )
-        return {
-            "output": error_response,
-            "conversation_history": (state.get("conversation_history", []) or []) + [
-                {"user": state.get("input", ""), "assistant": error_response}
-            ],
-            "risk_context": state.get("risk_context", {}),
-            "user_data": state.get("user_data", {}),
-            "risk_generation_requested": False,
-            "preference_update_requested": False,
-            "risk_register_requested": False
-        }
-
-@traceable(project_name=LANGSMITH_PROJECT_NAME, name="control_knowledge_node")
-def control_knowledge_node(state: LLMState) -> LLMState:
-    print("Control Knowledge Node Activated")
-    try:
-        user_input = state.get("input", "")
+        user_input = state["input"]
         conversation_history = state.get("conversation_history", [])
-        control_parameters = state.get("control_parameters", {})
+        risk_context = state.get("risk_context", {})
+        user_data = state.get("user_data", {})
         
-        # Extract context from recent conversation about controls
-        recent_control_context = ""
-        for msg in conversation_history[-3:]:  # Look at last 3 exchanges
-            if msg.get("assistant") and any(keyword in msg["assistant"].lower() for keyword in ["control id:", "control title:", "c-", "annex a"]):
-                recent_control_context += f"Previous context: {msg['assistant']}\n"
-        
-        from knowledge_base import ISO_27001_KNOWLEDGE
-        system_prompt = f"""
-You are an ISO 27001:2022 controls implementation expert. Your role is to provide practical, actionable guidance for implementing security controls.
+        # LLM-based intent router for Risk Node
+        system_prompt = """
+You are the **Risk Node Intent Router**. Your job is to infer the user's **single best intent** (semantic intent, not keywords), extract normalized slots, and return **only** one JSON object in the exact format below—no extra text, no markdown, no code fences.
 
-RECENT CONVERSATION CONTEXT:
-{recent_control_context}
+### Output (strict)
+{
+  "intent": "<one_of_intents>",
+  "slots": { },
+  "rationale": "<brief one-sentence why>",
+  "confidence": <0.0-1.0>,
+  "clarifying_question": "<only include if intent='clarify'>"
+}
 
-When a user asks about implementation ("how can I implement", "how to deploy", "implementation steps"), provide:
-1. **Step-by-step implementation guidance**
-2. **Organizational considerations**
-3. **Resource requirements**
-4. **Success metrics/KPIs**
-5. **Common challenges and solutions**
-6. **Best practices**
+### Allowed intents
+- generate_risks — create a set of risks given org/location/domain/total.
+- update_preferences — update persistent preferences (risk profiles, scales, matrix size).
+- view_risk_profile — open the risk profile dashboard/table view.
+- view_risk_register — open the risk register/finalized risks view and handle search/filter queries.
+- preview_matrix — show likelihood-impact matrix recommendation/preview.
+- clarify — ask one focused question when essential info is missing or multiple intents are equally plausible.
 
-For general control questions, use the provided dataset to answer about Annex A domains and controls. Be concise and map queries to control IDs where possible.
+### Slot schema & normalization (populate only what’s present)
+- organization_name: string (e.g., "Acme Bank", "fintech startup")
+- location: string (prefer "City, Country" if given; else region/country)
+- domain: canonical string from { "cybersecurity","operational","financial","strategic","compliance","privacy","supply_chain","manufacturing","cloud","data","physical_security","it","enterprise" }. Map synonyms (e.g., "infosec"→"cybersecurity", "ops"→"operational").
+- total: integer (e.g., 25)
+- matrix_size: string "NxN" (e.g., "4x4","5x5")
+- risk_profiles: array of strings (e.g., ["strategic","operational"])
+- scales: object { "likelihood": "1-5" | "1-7", "impact": "1-5" | "1-7" }
+- effective_date: ISO 8601 date if specified (YYYY-MM-DD)
+- filters: object for view intents (e.g., {"region":"APAC","status":"finalized"})
 
-DATASET:
-{ISO_27001_KNOWLEDGE}
+Normalize numbers (e.g., "twenty"→20), dates (to ISO 8601), casing (title case for orgs/locations), and synonyms.
 
-If the user is asking about implementing a specific control mentioned in the recent conversation, provide detailed implementation guidance tailored to that control.
+### Decision rules (precision first)
+1. **Prefer action over Q&A** when the user asks to *do* something (generate/show/open/recommend/change).
+2. If **essential slots** for an action are missing or **multiple intents** are equally likely → use `clarify` and ask **one** targeted, closed question that names the missing piece(s).
+3. If the user asks to **change defaults/settings** (scales, matrix, profiles, default counts) → `update_preferences`.
+4. “Open/Show/View” the register → `view_risk_register`; the profile table → `view_risk_profile`.
+5. “Recommend/Suggest/Pick a XxY matrix/heatmap” → `preview_matrix` (extract `matrix_size` if present).
+6. If the user both *requests a view* and *requests generation*, **generation takes precedence** (`generate_risks`) unless the user explicitly says “don’t generate”.
+7. Greetings, small talk, or broad vagueness (“make it safer”, “help me start”) → `clarify`.
+8. Out-of-scope or generic knowledge questions (no actionable mapping) → `clarify` asking which action they want.
+
+### Confidence rubric
+- 0.85–1.00: Clear imperative with required slots or unambiguous view/update.
+- 0.60–0.84: Some inference required; minor slot gaps but intent is clear.
+- <0.60: Ambiguous or missing essential info → prefer `clarify`.
+
+### Synonym & phrase mapping (non-exhaustive)
+- risk register: {"register","log","finalized risks","approved list"} → view_risk_register
+- risk profile: {"profile table","risk appetite profile","baseline profile"} → view_risk_profile (if viewing); update_preferences (if changing)
+- matrix: {"heatmap","risk heat map","grid","4 by 4"} → preview_matrix (matrix_size="4x4")
+- cybersecurity: {"infosec","security","cyber"} → "cybersecurity"
+- operational: {"ops","operations"} → "operational"
+
+### Few-shot examples
+
+User: Generate an initial set of 25 cyber risks for a fintech in London.
+{
+  "intent": "generate_risks",
+  "slots": {"organization_name": "fintech", "location": "London", "domain": "cybersecurity", "total": 25},
+  "rationale": "Explicit creation request with domain, location, and count.",
+  "confidence": 0.92
+}
+
+User: Show me the current risk profile table.
+{
+  "intent": "view_risk_profile",
+  "slots": {},
+  "rationale": "Direct request to view the profile table.",
+  "confidence": 0.96
+}
+
+User: Open my risk register for APAC.
+{
+  "intent": "view_risk_register",
+  "slots": {"filters": {"region": "APAC"}},
+  "rationale": "Wants the finalized risks view, filtered by region.",
+  "confidence": 0.93
+}
+
+User: Find me risks with high impact.
+{
+  "intent": "view_risk_register",
+  "slots": {"filters": {"impact": "high"}},
+  "rationale": "Searching for specific risks by impact level.",
+  "confidence": 0.95
+}
+
+User: Show me all cybersecurity risks.
+{
+  "intent": "view_risk_register",
+  "slots": {"filters": {"category": "cybersecurity"}},
+  "rationale": "Filtering risks by category.",
+  "confidence": 0.92
+}
+
+User: Recommend a 4x4 matrix for my startup.
+{
+  "intent": "preview_matrix",
+  "slots": {"matrix_size": "4x4"},
+  "rationale": "Asks for a matrix recommendation with size.",
+  "confidence": 0.90
+}
+
+User: Switch our likelihood scale to 1-7 and keep impact at 1-5.
+{
+  "intent": "update_preferences",
+  "slots": {"scales": {"likelihood": "1-7", "impact": "1-5"}},
+  "rationale": "Explicit preference change to scales.",
+  "confidence": 0.95
+}
+
+User: Set default matrix to 5x5 and use profiles strategic + operational.
+{
+  "intent": "update_preferences",
+  "slots": {"matrix_size": "5x5", "risk_profiles": ["strategic","operational"]},
+  "rationale": "Updates persistent defaults for matrix and profiles.",
+  "confidence": 0.94
+}
+
+User: Spin up 15 risks for our hospital in Bangalore focusing on privacy.
+{
+  "intent": "generate_risks",
+  "slots": {"organization_name": "hospital", "location": "Bangalore", "domain": "privacy", "total": 15},
+  "rationale": "Creation request with org, location, domain, and count.",
+  "confidence": 0.90
+}
+
+User: Show the heat map.
+{
+  "intent": "preview_matrix",
+  "slots": {},
+  "rationale": "Heat map refers to the matrix preview; size not specified.",
+  "confidence": 0.75
+}
+
+User: Make it safer.
+{
+  "intent": "clarify",
+  "slots": {},
+  "rationale": "Underspecified; could be generate, preview, or update.",
+  "confidence": 0.35,
+  "clarifying_question": "Do you want me to generate new risks, open the profile/register view, or adjust preferences like matrix size or scales?"
+}
+
+User: Generate risks for my SaaS; use our standard scales.
+{
+  "intent": "generate_risks",
+  "slots": {"organization_name": "SaaS"},
+  "rationale": "Actionable creation request; scales reference existing prefs.",
+  "confidence": 0.78
+}
+
+### Validation
+- Output must be a single JSON object with exactly the specified keys.
+- Include "clarifying_question" **only** when intent = "clarify".
+- Do not include code fences, extra commentary, or additional fields.
+
 """
-        
-        resp = make_llm_call_with_history(system_prompt, user_input, conversation_history)
-        updated_history = conversation_history + [{"user": user_input, "assistant": resp}]
-        return {**state, "output": resp, "conversation_history": updated_history}
-        
-    except Exception as e:
-        error_msg = f"I'd be happy to help with control implementation guidance, but I encountered an error: {str(e)}"
-        return {**state, "output": error_msg}
 
-def generate_controls_for_risk(risk_data: dict, user_context: dict, conversation_history: list) -> list:
-    """Generate controls for a single risk using direct LLM call"""
-    print(f"DEBUG: Entering generate_controls_for_risk for risk: {risk_data.get('description', 'No description')[:50]}...")
-    try:
-        # Create comprehensive context for control generation
-        risk_context = f"""
-Risk Details:
-- ID: {risk_data.get('id', 'N/A')}
-- Description: {risk_data.get('description', '')}
-- Category: {risk_data.get('category', '')}
-- Impact: {risk_data.get('impact', '')}
-- Likelihood: {risk_data.get('likelihood', '')}
-- Treatment Strategy: {risk_data.get('treatment_strategy', '')}
-- Department: {risk_data.get('department', '')}
-- Risk Owner: {risk_data.get('risk_owner', '')}
-
-Organization Context:
-- Organization: {user_context.get('organization_name', '')}
-- Domain: {user_context.get('domain', '')}
-- Location: {user_context.get('location', '')}
-"""
-        
-        # Debug: Check ISO knowledge
-        iso_knowledge = ISO_27001_KNOWLEDGE.get("ISO27001_2022", {}).get("Annex_A")
-        print(f"DEBUG: ISO Knowledge available: {bool(iso_knowledge)}")
-        if iso_knowledge:
-            print(f"DEBUG: ISO Knowledge type: {type(iso_knowledge)}")
-            if isinstance(iso_knowledge, dict):
-                print(f"DEBUG: ISO Knowledge keys: {list(iso_knowledge.keys())[:5]}")
-        
-        system_prompt = f"""
-You are an ISO 27001:2022 Controls Specialist. Based on the risk provided, generate 3-5 specific, actionable ISO 27001:2022 Annex A controls in the comprehensive format.
-
-Knowledge for the ISO 27001:2022 Annex A references:
-SOURCE OF TRUTH (read-only)
-{ISO_27001_KNOWLEDGE}
-# The above JSON is the canonical dataset. Do not invent entries, numbers, or text that are not present here.
-
-Risk Context:
-{risk_context}
-
-Your task is to analyze this risk and generate relevant controls that would effectively mitigate this specific risk.
-
-For each control, provide a comprehensive structure with:
-1. control_id: Unique identifier (format: C-[NUMBER], e.g., "C-001", "C-002")
-2. control_title: Clear, specific control title
-3. control_description: Detailed description of what this control addresses for this risk
-4. objective: Business objective and purpose of the control
-5. annexA_map: Array of relevant ISO 27001:2022 Annex A mappings with id and title
-6. linked_risk_ids: Array containing the risk ID this control addresses
-7. owner_role: Suggested role responsible for this control (e.g., "CISO", "IT Manager", "Security Officer")
-8. process_steps: Array of 3-5 specific implementation steps
-9. evidence_samples: Array of 3-5 examples of evidence/documentation for this control
-10. metrics: Array of 2-4 measurable KPIs or metrics to track control effectiveness
-11. frequency: How often the control is executed/reviewed (e.g., "Quarterly", "Monthly", "Annually")
-12. policy_ref: Reference to related organizational policy
-13. status: Set to "Planned" for new controls
-14. rationale: Why this control is necessary for mitigating the specific risk
-15. assumptions: Any assumptions made (can be empty string if none)
-
-REQUIREMENTS:
-- Controls must be specifically relevant to the risk described
-- Use appropriate ISO 27001:2022 Annex A references from the knowledge base
-- Make controls actionable and specific to the organization context
-- Ensure process_steps are concrete and implementable
-- Evidence_samples should be realistic audit artifacts
-- Metrics should be measurable and relevant to the control objective
-- Consider the department and risk owner in the owner_role assignment
-
-Return ONLY a valid JSON array of controls in this format:
-[
-  {{
-    "control_id": "C-001",
-    "control_title": "...",
-    "control_description": "...",
-    "objective": "...",
-    "annexA_map": [
-      {{"id": "A.X.Y", "title": "..."}}
-    ],
-    "linked_risk_ids": ["{risk_data.get('id', 'RISK-001')}"],
-    "owner_role": "...",
-    "process_steps": [
-      "Step 1...",
-      "Step 2..."
-    ],
-    "evidence_samples": [
-      "Document 1...",
-      "Report 2..."
-    ],
-    "metrics": [
-      "Metric 1...",
-      "Metric 2..."
-    ],
-    "frequency": "...",
-    "policy_ref": "...",
-    "status": "Planned",
-    "rationale": "...",
-    "assumptions": ""
-  }}
-]
-
-Do not include any explanatory text, only the JSON array.
-"""
-
-        user_input = f"Generate ISO 27001 controls for the risk: {risk_data.get('description', '')}"
-        print(f"DEBUG: Making LLM call with user_input: {user_input[:100]}...")
         response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
-        print(f"DEBUG: LLM response length: {len(response_content)}")
-        print(f"DEBUG: LLM response preview: {response_content[:200]}...")
-        
-        # Parse JSON response
+
         content = response_content.strip()
         if content.startswith("```") and content.endswith("```"):
-            content = content.strip('`').strip()
-            if content.startswith('json'):
-                content = content[4:].strip()
+            # Strip code fences if model returned fenced JSON
+            content = content.strip('`')
         
-        # Extract JSON array
-        start = content.find('[')
-        end = content.rfind(']')
-        print(f"DEBUG: JSON array bounds: start={start}, end={end}")
-        if start != -1 and end != -1 and end > start:
-            controls_json = content[start:end+1]
-            print(f"DEBUG: Extracted JSON: {controls_json[:200]}...")
-            controls = json.loads(controls_json)
-            print(f"DEBUG: Parsed {len(controls) if isinstance(controls, list) else 0} controls from JSON")
-            return controls if isinstance(controls, list) else []
-        
-        print("DEBUG: No valid JSON array found in response")
-        return []
-        
-    except json.JSONDecodeError as e:
-        print(f"JSON decode error in control generation: {e}")
-        return []
-    except Exception as e:
-        print(f"Error generating controls for risk: {e}")
-        return []
-
-@traceable(project_name=LANGSMITH_PROJECT_NAME, name="risk_node")
-def risk_node(state: LLMState):
-    """Conversational risk management assistant with semantic intent understanding"""
-    print("Risk Node Activated")
-    
-    user_input = state["input"]
-    conversation_history = state.get("conversation_history", [])
-    risk_context = state.get("risk_context", {})
-    user_data = state.get("user_data", {})
-    
-    # Industry-standard conversational prompt
-    system_prompt = """# Risk Management Assistant - Intent Classification
-
-## Role  
-You are a conversational risk management specialist. Analyze user intent and either route to appropriate risk sub-domains or ask clarifying questions to better understand their needs.
-
-## Available Risk Sub-Domains
-1. **risk_generation**: Creating/generating new organizational risks
-2. **risk_register**: Viewing, searching, and managing existing finalized risks  
-3. **risk_profiling**: Managing risk profiles, preferences, scales, and frameworks
-4. **matrix_recommendation**: Creating or recommending risk assessment matrices
-5. **general_guidance**: Providing risk management advice and education
-
-## Task
-Understand what the user wants to accomplish with risk management and determine the best way to help them.
-
-## Decision Framework
-1. **Semantic Intent Analysis**: What is the user's underlying goal?
-2. **Context Integration**: Consider conversation history and organizational context
-3. **Confidence Assessment**: Rate understanding confidence (0.0-1.0)
-4. **Action Decision**: Route (≥0.8 confidence) or clarify (<0.8 confidence)
-
-## Output Format
-```json
-{
-  "action": "route" | "clarify",
-  "sub_domain": "risk_generation" | "risk_register" | "risk_profiling" | "matrix_recommendation" | "general_guidance" | null,
-  "confidence": 0.0-1.0,
-  "reasoning": "Brief explanation of understanding",
-  "extracted_params": {
-    "organization_type": "hospital|bank|startup|...",
-    "location": "city, country", 
-    "domain": "healthcare|financial|technology|...",
-    "risk_count": 25,
-    "matrix_size": "3x3|4x4|5x5",
-    "category_focus": "operational|financial|strategic|..."
-  },
-  "clarifying_question": "Question for user (only when action is 'clarify')"
-}
-```
-
-## Intent Classification Examples
-
-### Risk Generation (Create New Risks):
-- "Generate 25 cyber risks for our fintech startup"
-- "Create operational risks for a hospital in Mumbai" 
-- "I need privacy risks for our organization"
-- "Help me identify financial risks"
-
-### Risk Register (Manage Existing Risks):
-- "Show me all high-impact risks"
-- "Find cybersecurity risks in my register"
-- "List risks owned by John Smith"
-- "Search for data breach risks"
-- "Open my risk register"
-
-### Risk Profiling (Preferences & Configuration):
-- "Update my risk appetite settings"
-- "Change likelihood scale to 1-7"
-- "Set default matrix to 4x4"
-- "Modify risk profile preferences"
-- "Configure risk assessment framework"
-
-### Matrix Recommendation (Risk Assessment Framework):
-- "Recommend a risk matrix for my organization"
-- "Suggest a 4x4 matrix for healthcare"
-- "What matrix size should I use?"
-- "Create risk assessment heatmap"
-- "Show me matrix options"
-
-### General Guidance (Education & Advice):
-- "How do I assess risks?"
-- "What's a good risk treatment strategy?"
-- "Explain risk appetite vs tolerance"
-- "Best practices for risk management"
-
-### Clarification Examples:
-User: "Help me with risks"
-```json
-{
-  "action": "clarify",
-  "sub_domain": null, 
-  "confidence": 0.3,
-  "reasoning": "Very broad request - could be generation, viewing existing, or general guidance",
-  "clarifying_question": "I'm here to help with risk management. Are you looking to: identify new risks for your organization, review and manage existing risks you've already documented, or get guidance on risk assessment approaches?"
-}
-```
-
-User: "I need a matrix"
-```json
-{
-  "action": "clarify",
-  "sub_domain": null,
-  "confidence": 0.5, 
-  "reasoning": "Likely wants matrix recommendation but missing context about organization and requirements",
-  "clarifying_question": "I'd be happy to recommend a risk assessment matrix. To give you the most suitable recommendation, could you tell me about your organization type and industry? For example, are you working with a startup, established company, healthcare organization, financial services, etc.?"
-}
-```
-
-## Parameter Extraction Guidelines
-When confident about routing, extract relevant parameters from user input:
-- **Organization details**: Type, industry, size indicators
-- **Location**: Geographic context for regulatory considerations  
-- **Risk focus**: Specific categories or domains mentioned
-- **Quantities**: Number of risks, matrix dimensions
-- **Scope**: Department, project, or organizational level
-
-## Context Integration
-- Reference conversation history: "Based on the organization details you mentioned earlier..."
-- Build on established context: "For the hospital in Mumbai we discussed..."
-- Connect related topics: "Now that we have your risk matrix, would you like to..."
-
-## Conversational Guidelines
-- Ask ONE focused question when clarifying
-- Offer 2-3 concrete options to help users choose
-- Use conversational, professional tone
-- Reference user's organizational context when known
-- Build understanding progressively through multiple exchanges if needed
-"""
-
-    try:
-        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
-        
-        # Parse JSON response
-        content = response_content.strip()
-        if content.startswith("```json") and content.endswith("```"):
-            content = content[7:-3].strip()
-        elif content.startswith("```") and content.endswith("```"):
-            content = content[3:-3].strip()
-        
+        # Attempt to extract JSON if wrapped
         try:
-            result = json.loads(content)
-        except json.JSONDecodeError:
-            # Try to extract JSON
+            parsed = json.loads(content)
+        except Exception:
+            # Try to find first JSON object in the response
             start = content.find('{')
-            end = content.rfind('}') + 1
-            if start != -1 and end > start:
-                result = json.loads(content[start:end])
+            end = content.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                parsed = json.loads(content[start:end+1])
             else:
-                # Fallback to clarification
-                result = {
-                    "action": "clarify",
-                    "sub_domain": None,
-                    "confidence": 0.0,
-                    "reasoning": "Could not parse intent",
-                    "clarifying_question": "I want to make sure I provide the most helpful risk management assistance. Could you tell me more about what specific aspect you'd like help with - whether it's identifying new risks, managing existing ones, or configuring your risk assessment approach?"
-                }
-        
-        action = result.get("action", "clarify")
-        sub_domain = result.get("sub_domain")
-        confidence = result.get("confidence", 0.0)
-        reasoning = result.get("reasoning", "")
-        extracted_params = result.get("extracted_params", {})
-        clarifying_question = result.get("clarifying_question", "")
-        
-        print(f"DEBUG: Risk node - Action: {action}, Sub-domain: {sub_domain}, Confidence: {confidence}")
-        print(f"DEBUG: Risk node - Reasoning: {reasoning}")
-        print(f"DEBUG: Risk node - Extracted params: {extracted_params}")
-        
-        # Handle routing decision
-        if action == "route" and sub_domain and confidence >= 0.8:
-            # Store extracted parameters for the target node
-            if extracted_params:
-                risk_context.update(extracted_params)
-            
-            # Route to appropriate sub-domain
-            if sub_domain == "risk_generation":
-                return {
-                    "input": state["input"],
-                    "output": "",
-                    "conversation_history": conversation_history,
-                    "risk_context": risk_context,
-                    "user_data": user_data,
-                    "risk_generation_requested": True,
-                    "preference_update_requested": False,
-                    "risk_register_requested": False,
-                    "risk_profile_requested": False,
-                    "matrix_recommendation_requested": False
-                }
-            elif sub_domain == "risk_register":
-                return {
-                    "input": state["input"],
-                    "output": "",
-                    "conversation_history": conversation_history,
-                    "risk_context": risk_context,
-                    "user_data": user_data,
-                    "risk_generation_requested": False,
-                    "preference_update_requested": False,
-                    "risk_register_requested": True,
-                    "risk_profile_requested": False,
-                    "matrix_recommendation_requested": False
-                }
-            elif sub_domain == "risk_profiling":
-                return {
-                    "input": state["input"],
-                    "output": "",
-                    "conversation_history": conversation_history,
-                    "risk_context": risk_context,
-                    "user_data": user_data,
-                    "risk_generation_requested": False,
-                    "preference_update_requested": True,
-                    "risk_register_requested": False,
-                    "risk_profile_requested": False,
-                    "matrix_recommendation_requested": False
-                }
-            elif sub_domain == "matrix_recommendation":
-                # Extract matrix size if provided
-                matrix_size = extracted_params.get("matrix_size", "5x5")
-                return {
-                    "input": state["input"],
-                    "output": "",
-                    "conversation_history": conversation_history,
-                    "risk_context": risk_context,
-                    "user_data": user_data,
-                    "risk_generation_requested": False,
-                    "preference_update_requested": False,
-                    "risk_register_requested": False,
-                    "risk_profile_requested": False,
-                    "matrix_recommendation_requested": True,
-                    "matrix_size": matrix_size
-                }
-            elif sub_domain == "general_guidance":
-                # Handle general guidance directly in this node
-                guidance_response = provide_risk_guidance(user_input, conversation_history, user_data)
-                updated_history = conversation_history + [
-                    {"user": user_input, "assistant": guidance_response}
-                ]
-                return {
-                    "input": state["input"],
-                    "output": guidance_response,
-                    "conversation_history": updated_history,
-                    "risk_context": risk_context,
-                    "user_data": user_data,
-                    "risk_generation_requested": False,
-                    "preference_update_requested": False,
-                    "risk_register_requested": False,
-                    "risk_profile_requested": False,
-                    "matrix_recommendation_requested": False
-                }
-        
-        # Ask clarifying question
-        if not clarifying_question:
-            clarifying_question = "I'm here to help with risk management. Could you tell me more about what you're looking to accomplish - whether it's identifying new risks, managing existing risks, setting up assessment frameworks, or getting guidance on risk management approaches?"
-        
-        # Update conversation history
+                parsed = {"intent": "clarify", "slots": {}, "rationale": "Unparseable response", "confidence": 0.0, "clarifying_question": "Could you rephrase your request?"}
+
+        intent = (parsed.get("intent") or "").lower()
+        slots = parsed.get("slots") or {}
+
+        # Map intents to flags/nodes
+        if intent == "generate_risks":
+            return {
+                "output": "",
+                "conversation_history": conversation_history,
+                "risk_context": risk_context,
+                "user_data": user_data,
+                "risk_generation_requested": True,
+                "preference_update_requested": False,
+                "risk_register_requested": False,
+                "risk_profile_requested": False,
+                "matrix_recommendation_requested": False
+            }
+        if intent == "update_preferences":
+            return {
+                "output": "",
+                "conversation_history": conversation_history,
+                "risk_context": risk_context,
+                "user_data": user_data,
+                "risk_generation_requested": False,
+                "preference_update_requested": True,
+                "risk_register_requested": False,
+                "risk_profile_requested": False,
+                "matrix_recommendation_requested": False
+            }
+        if intent == "view_risk_register":
+            return {
+                "output": "",
+                "conversation_history": conversation_history,
+                "risk_context": risk_context,
+                "user_data": user_data,
+                "risk_generation_requested": False,
+                "preference_update_requested": False,
+                "risk_register_requested": True,
+                "risk_profile_requested": False,
+                "matrix_recommendation_requested": False
+            }
+        if intent == "view_risk_profile":
+            return {
+                "output": "",
+                "conversation_history": conversation_history,
+                "risk_context": risk_context,
+                "user_data": user_data,
+                "risk_generation_requested": False,
+                "preference_update_requested": False,
+                "risk_register_requested": False,
+                "risk_profile_requested": True,
+                "matrix_recommendation_requested": False
+            }
+        if intent == "preview_matrix":
+            matrix_size = slots.get("matrix_size") or slots.get("size")
+            return {
+                "output": "",
+                "conversation_history": conversation_history,
+                "risk_context": risk_context,
+                "user_data": user_data,
+                "risk_generation_requested": False,
+                "preference_update_requested": False,
+                "risk_register_requested": False,
+                "risk_profile_requested": False,
+                "matrix_recommendation_requested": True,
+                "matrix_size": matrix_size or "5x5"
+            }
+
+        # Clarify or fallback: respond with clarifying question if provided
+        clarifying_question = parsed.get("clarifying_question") or "Could you clarify what you want to do regarding risks?"
+
         updated_history = conversation_history + [
             {"user": user_input, "assistant": clarifying_question}
         ]
-        
         return {
-            "input": state["input"],
             "output": clarifying_question,
             "conversation_history": updated_history,
             "risk_context": risk_context,
@@ -1284,65 +405,16 @@ When confident about routing, extract relevant parameters from user input:
             "risk_profile_requested": False,
             "matrix_recommendation_requested": False
         }
-        
     except Exception as e:
-        print(f"Error in risk_node: {str(e)}")
-        error_response = "I want to help you with risk management. Could you tell me what specific aspect you'd like assistance with - whether it's risk assessment, risk monitoring, or risk treatment planning?"
-        
-        updated_history = conversation_history + [
-            {"user": user_input, "assistant": error_response}
-        ]
-        
         return {
-            "input": state["input"],
-            "output": error_response,
-            "conversation_history": updated_history,
-            "risk_context": risk_context,
-            "user_data": user_data,
+            "output": f"I apologize, but I encountered an error while processing your risk management query: {str(e)}. Please try again.",
+            "conversation_history": state.get("conversation_history", []),
+            "risk_context": state.get("risk_context", {}),
             "risk_generation_requested": False,
-            "preference_update_requested": False,
-            "risk_register_requested": False,
-            "risk_profile_requested": False,
-            "matrix_recommendation_requested": False
+            "preference_update_requested": False
         }
 
-
-def provide_risk_guidance(user_input: str, conversation_history: list, user_data: dict) -> str:
-    """Provide general risk management guidance and education"""
-    
-    guidance_prompt = """# Risk Management Guidance Assistant
-
-## Role
-You are a helpful risk management consultant providing practical guidance and education.
-
-## Task  
-Provide clear, actionable guidance on risk management topics. Use conversational language and practical examples.
-
-## Guidelines
-- Keep responses focused and actionable
-- Use industry best practices
-- Reference relevant frameworks (ISO 31000, COSO, etc.) when appropriate
-- Provide concrete examples
-- Consider the user's organizational context when known
-- Offer next steps or follow-up actions
-
-## Response Style
-- Professional but conversational
-- Structured with clear headings when covering multiple points
-- Include practical tips and best practices
-- Suggest related topics or next steps
-- Keep responses comprehensive but not overwhelming (aim for 200-400 words)
-"""
-    
-    try:
-        response = make_llm_call_with_history(guidance_prompt, user_input, conversation_history)
-        return response
-    except Exception as e:
-        return "I'd be happy to provide risk management guidance. Could you be more specific about the aspect you'd like help with - such as risk identification, assessment methods, treatment strategies, or monitoring approaches?"
-    
-
 # 3. Define the risk generation node
-@traceable(project_name=LANGSMITH_PROJECT_NAME, name="risk_generation_node")
 def risk_generation_node(state: LLMState):
     """Generate organization-specific risks based on user data"""
     print("Risk Generation Node Activated")
@@ -1488,7 +560,6 @@ INTERPRETATION EXAMPLES (do not echo in output)
         }
 
 # 4. Define the preference update node
-@traceable(project_name=LANGSMITH_PROJECT_NAME, name="risk_register_node")
 def risk_register_node(state: LLMState):
     """Open the risk register, and when the user asks to find/filter risks,
     perform semantic search via a LangGraph tool call (OpenAI model)."""
@@ -1585,8 +656,188 @@ You are the Risk Register assistant.
             "risk_register_requested": False
         }
 
+def preference_update_node(state: LLMState):
+    """Handle user preference updates for risk profiles"""
+    print("Preference Update Node Activated")
+    try:
+        llm = get_llm()
+
+        user_input = state["input"]
+        user_data = state.get("user_data", {})
+        
+        # Get username from user_data (assuming it's passed from main.py)
+        username = user_data.get("username", "")
+        
+        # Get user's current risk profiles
+        from database import RiskProfileDatabaseService
+        # Synchronously retrieve risk profiles
+        result = RiskProfileDatabaseService.get_user_risk_profiles(username)
+
+        if not result.success or not result.data or not result.data.get("profiles"):
+            return {
+                "output": "I apologize, but I couldn't retrieve your risk profiles. Please try accessing your risk profile dashboard first.",
+                "conversation_history": state.get("conversation_history", []),
+                "risk_context": state.get("risk_context", {}),
+                "user_data": user_data,
+                "risk_generation_requested": False,
+                "preference_update_requested": False,
+                "risk_register_requested": False,
+                "risk_profile_requested": False
+            }
+        
+        profiles = result.data.get("profiles", [])
+        # Use the first profile's scales as current values (they should all be 5x5)
+        current_likelihood = ["Low", "Medium", "High", "Severe", "Critical"]
+        current_impact = ["Low", "Medium", "High", "Severe", "Critical"]
+        
+        if profiles:
+            first_profile = profiles[0]
+            current_likelihood = [level["title"] for level in first_profile.get("likelihoodScale", [])]
+            current_impact = [level["title"] for level in first_profile.get("impactScale", [])]
+        
+        # Check if user wants to see current values
+        show_current_keywords = [
+            "current", "show", "view", "get", "what are", "display", "see my"
+        ]
+        
+        user_input_lower = user_input.lower()
+        wants_to_see_current = any(keyword in user_input_lower for keyword in show_current_keywords)
+        
+        if wants_to_see_current:
+            response_text = f"""📊 **Current Risk Profile Settings**
+
+Your current risk matrix configuration:
+- **Likelihood Levels**: {current_likelihood}
+- **Impact Levels**: {current_impact}
+- **Matrix Size**: {len(current_likelihood)}x{len(current_impact)}
+- **Risk Profiles**: {len(profiles)} categories configured
+
+This means your risk assessments will use {len(current_likelihood)} levels for both likelihood and impact evaluation across {len(profiles)} risk categories.
+
+To update your preferences, you can modify individual risk profiles through the risk profile dashboard."""
+        else:
+            # Since we now use risk profiles, provide guidance on how to update them
+            response_text = f"""🔄 **Risk Profile Management**
+
+Your risk preferences are now managed through individual risk profiles. You currently have {len(profiles)} risk categories configured, each with their own assessment scales.
+
+**Current Configuration:**
+- **Matrix Size**: {len(current_likelihood)}x{len(current_impact)}
+- **Risk Categories**: {len(profiles)} profiles
+
+**To update your preferences:**
+1. Access your risk profile dashboard by asking "show my risk profile"
+2. Each risk category can be customized independently
+3. You can modify likelihood and impact scales for specific risk types
+4. Changes are applied per risk category for more granular control
+
+**Available Risk Categories:**
+"""
+            for profile in profiles:
+                risk_type = profile.get("riskType", "")
+                response_text += f"• {risk_type}\n"
+            
+            response_text += "\nThis approach provides more flexibility and category-specific customization."
+        
+        # Update conversation history
+        conversation_history = state.get("conversation_history", [])
+        updated_history = conversation_history + [
+            {"user": user_input, "assistant": response_text}
+        ]
+        
+        return {
+            "output": response_text,
+            "conversation_history": updated_history,
+            "risk_context": state.get("risk_context", {}),
+            "user_data": user_data,
+            "risk_generation_requested": False,
+            "preference_update_requested": False,
+            "risk_register_requested": False,
+            "risk_profile_requested": False
+        }
+        
+    except Exception as e:
+        return {
+            "output": f"I apologize, but I encountered an error while updating your preferences: {str(e)}. Please try again.",
+            "conversation_history": state.get("conversation_history", []),
+            "risk_context": state.get("risk_context", {}),
+            "user_data": state.get("user_data", {}),
+            "risk_generation_requested": False,
+            "preference_update_requested": False,
+            "risk_register_requested": False,
+            "risk_profile_requested": False
+        }
+
+# 4. Define the risk profile node
+def risk_profile_node(state: LLMState):
+    """Handle risk profile requests and display user's risk categories and scales"""
+    print("Risk Profile Node Activated")
+    try:
+        user_input = state["input"]
+        user_data = state.get("user_data", {})
+        
+        # Simple response that directs users to the frontend risk profile table
+        response_text = """📊 **Your Risk Profile Dashboard**
+
+I'll open your comprehensive risk assessment framework for you! 
+
+Your risk profile includes:
+• **8 Risk Categories** with specialized assessment criteria
+• **5x5 Assessment Matrix** for each category
+• **Category-Specific Scales** for likelihood and impact
+• **Detailed Definitions** and assessment criteria
+
+The risk profile table will show you:
+- Strategic Risk
+- Operational Risk  
+- Financial Risk
+- Compliance Risk
+- Reputational Risk
+- Health and Safety Risk
+- Environmental Risk
+- Technology Risk
+
+Each category has its own 1-5 scales for both likelihood and impact, ensuring precise and relevant risk assessment for your organization.
+
+**How to use your risk profile:**
+• Each risk category has its own specialized assessment criteria
+• Use the 1-5 scales to evaluate likelihood and impact for specific risks
+• This framework ensures consistent and comprehensive risk assessment
+• You can customize these scales based on your organization's needs
+
+To generate risks using these profiles, simply ask me to "generate risks" or "recommend risks" for your organization."""
+        
+        # Update conversation history
+        conversation_history = state.get("conversation_history", [])
+        updated_history = conversation_history + [
+            {"user": user_input, "assistant": response_text}
+        ]
+        
+        return {
+            "output": response_text,
+            "conversation_history": updated_history,
+            "risk_context": state.get("risk_context", {}),
+            "user_data": user_data,
+            "risk_generation_requested": False,
+            "preference_update_requested": False,
+            "risk_register_requested": False,
+            "risk_profile_requested": False
+        }
+        
+    except Exception as e:
+        return {
+            "output": f"I apologize, but I encountered an error while accessing your risk profile: {str(e)}. Please try again.",
+            "conversation_history": state.get("conversation_history", []),
+            "risk_context": state.get("risk_context", {}),
+            "user_data": state.get("user_data", {}),
+            "risk_generation_requested": False,
+            "preference_update_requested": False,
+            "risk_register_requested": False,
+            "risk_profile_requested": False,
+            "matrix_recommendation_requested": False
+        }
+
 # 5. Define the matrix recommendation node
-@traceable(project_name=LANGSMITH_PROJECT_NAME, name="matrix_recommendation_node")
 def matrix_recommendation_node(state: LLMState):
     print("Matrix Recommendation Node Activated")
     try:
@@ -1880,281 +1131,222 @@ IMPORTANT:
             "matrix_recommendation_requested": False,
         }
 
-@traceable(project_name=LANGSMITH_PROJECT_NAME, name="orchestrator_node")
+
+
+def update_risk_context(current_context: dict, user_input: str, assistant_response: str) -> dict:
+    """Update risk context based on conversation"""
+    print("Updating Risk Context")
+    context = current_context.copy()
+    
+    # Extract organization and industry mentions
+    org_keywords = ["company", "organization", "firm", "business", "enterprise"]
+    industry_keywords = ["banking", "healthcare", "manufacturing", "retail", "technology", "finance", "insurance"]
+    
+    user_input_lower = user_input.lower()
+    
+    # Simple keyword-based context extraction
+    for keyword in org_keywords:
+        if keyword in user_input_lower:
+            # Extract organization name (simplified)
+            context["organization"] = "Organization mentioned"
+            break
+    
+    for keyword in industry_keywords:
+        if keyword in user_input_lower:
+            context["industry"] = keyword.title()
+            break
+    
+    return context
+
 def orchestrator_node(state: LLMState) -> LLMState:
-    """Conversational orchestrator that uses LLM for semantic intent understanding"""
+    """Node responsible for routing user queries to relevant nodes based on intent classification"""
     print("Orchestrator Activated")
+    system_prompt = """
+You are an intelligent orchestrator agent responsible for classifying user queries and routing them to the appropriate specialized nodes.
+
+Your task is to analyze the user's query and determine which node should handle it based on the intent.
+
+INTENT CLASSIFICATION RULES:
+
+1. AUDIT-RELATED QUERIES: Route to "audit_facilitator" if the query is about:
+   - Organization audits
+   - Audit processes
+   - Audit findings
+   - Audit reports
+   - Audit compliance
+   - Audit procedures
+   - Audit standards
+   - Internal audits
+   - External audits
+   - Audit documentation
+
+2. ISO 27001 QUERIES: Route to "knowledge_node" if the query is about:
+   - ISO 27001:2022 standard
+   - Information security management
+   - ISMS requirements
+   - ISO clauses and controls
+   - Annex A controls
+   - ISO compliance
+   - Information security policies
+   - Risk management (as it pertains to ISO requirements)
+   - Security controls
+
+3. RISK-RELATED QUERIES: Route to "risk_node" if the query is about:
+   - Risk assessments and analysis
+   - Risk query, searching, filtering, and finding (e.g., "find risks with high impact", "show me cybersecurity risks", "list operational risks")
+   - Risk registers and risk entries
+   - Risk scoring or risk matrices
+   - Risk treatment and mitigation plans
+   - Risk generation or identification processes
+   - Updating or maintaining risk profiles
+   - Risk appetite and tolerance
+   - Risk matrix recommendations and prioritization
+   - Preference updates related to risk processes
+   - Any node-specific risk operations such as risk_generation, preference_update, risk_register, risk_profile, matrix_recommendation
+
+FEW-SHOT EXAMPLES:
+
+User: "What are the audit findings from last quarter?"
+Intent: AUDIT-RELATED
+Route to: audit_facilitator
+
+User: "Explain Clause 5.2 of ISO 27001"
+Intent: ISO 27001
+Route to: knowledge_node
+
+User: "I want to start the audit"
+Intent: AUDIT-RELATED
+Route to: audit_facilitator
+
+User: "What is Annex A.5.23?"
+Intent: ISO 27001
+Route to: knowledge_node
+
+User: "Show all my audits?"
+Intent: AUDIT-RELATED
+Route to: audit_facilitator
+
+User: "What are the leadership requirements in ISO 27001?"
+Intent: ISO 27001
+Route to: knowledge_node
+
+User: "Review our audit documentation"
+Intent: AUDIT-RELATED
+Route to: audit_facilitator
+
+User: "Explain the risk treatment process in ISO 27001"
+Intent: ISO 27001
+Route to: knowledge_node
+
+User: "Create a new risk entry in the risk register"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "How do I score and prioritize risks using a risk matrix?"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "Find me the risks related to data breach"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "Find me risks with high impact"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "Show me all cybersecurity risks"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "List operational risks with medium likelihood"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "Search for risks owned by John Smith"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "Generate risks for the new project scope"
+Intent: RISK-RELATED
+Route to: risk_node
+
+User: "Update my risk appetite and preferences"
+Intent: RISK-RELATED
+Route to: risk_node
+
+OUTPUT FORMAT:
+You MUST return EXACTLY one of these three strings (nothing else):
+- audit_facilitator
+- knowledge_node
+- risk_node
+
+Do NOT return any other text, explanations, or formatting. Return ONLY the node name.
+"""
     
     user_input = state["input"]
     conversation_history = state.get("conversation_history", [])
     risk_context = state.get("risk_context", {})
     user_data = state.get("user_data", {})
-    
-    # Industry-standard prompt with clear role, task, and output format
-    system_prompt = """# Risk Management Assistant - Intent Classification
-
-## Role
-You are a conversational intent classifier for a Risk Management Assistant that helps organizations with risk assessment, security controls, compliance, and ISO 27001 guidance.
-
-## Task
-Analyze the user's query within conversation context and determine the most appropriate action. You can either:
-1. Route to a specialized domain when intent is clear and confident
-2. Ask clarifying questions when intent is unclear or could have multiple interpretations
-
-## Available Domains
-- **risk_domain**: Risk assessment, risk registers, risk matrices, risk profiling, risk generation, risk scoring, risk treatment
-- **control_domain**: Security controls, control implementation, control generation, control management, control frameworks
-- **knowledge_domain**: ISO 27001 standards, information security concepts, compliance guidance, educational content
-- **audit_domain**: Audit processes, audit findings, audit compliance, audit documentation
-
-## Decision Process
-1. **Semantic Analysis**: Understand the user's underlying goal and intent
-2. **Confidence Assessment**: Rate your confidence in understanding the intent (0.0-1.0)
-3. **Action Decision**: 
-   - If confidence >= 0.8: Route to appropriate domain
-   - If confidence < 0.8: Ask clarifying questions
-
-## Output Format
-Return a JSON object with exactly this structure:
-
-```json
-{
-  "action": "route" | "clarify",
-  "domain": "risk_domain" | "control_domain" | "knowledge_domain" | "audit_domain" | null,
-  "confidence": 0.0-1.0,
-  "reasoning": "Brief explanation of your understanding",
-  "clarifying_question": "Question to ask user (only when action is 'clarify')"
-}
-```
-
-## Clarifying Question Guidelines
-When asking clarifying questions:
-- Ask ONE specific, focused question
-- Reference conversation context when relevant
-- Help narrow down the intent without being overwhelming
-- Use natural, conversational language
-- Offer 2-3 concrete options when helpful
-
-## Example Classifications
-
-### High Confidence Routing Examples:
-User: "Show me all cybersecurity risks in my organization"
-```json
-{
-  "action": "route",
-  "domain": "risk_domain", 
-  "confidence": 0.95,
-  "reasoning": "Clear request to view existing risks with specific category filter"
-}
-```
-
-User: "Generate ISO 27001 controls for data protection"
-```json
-{
-  "action": "route",
-  "domain": "control_domain",
-  "confidence": 0.90, 
-  "reasoning": "Specific request to generate security controls with clear scope"
-}
-```
-
-User: "What does clause 6.2 of ISO 27001 say?"
-```json
-{
-  "action": "route",
-  "domain": "knowledge_domain",
-  "confidence": 0.95,
-  "reasoning": "Direct question about specific ISO standard clause content"
-}
-```
-
-### Clarification Examples:
-User: "I need help with my matrix"
-```json
-{
-  "action": "clarify",
-  "domain": null,
-  "confidence": 0.4,
-  "reasoning": "Ambiguous request - could be risk matrix creation, viewing existing matrix, or matrix configuration",
-  "clarifying_question": "I'd be happy to help with your matrix. Are you looking to: create a new risk assessment matrix, view your existing risk data in matrix format, or modify your current risk matrix settings?"
-}
-```
-
-User: "What controls do I need?"
-```json
-{
-  "action": "clarify", 
-  "domain": null,
-  "confidence": 0.5,
-  "reasoning": "Could be asking for control generation, control education, or control recommendations",
-  "clarifying_question": "To give you the most relevant guidance - are you looking to generate specific controls for identified risks, learn about different types of security controls, or get recommendations for your industry?"
-}
-```
-
-## Context Considerations
-- Use conversation history to inform understanding
-- Consider user's organizational context (industry, role, previous topics)
-- Reference previous topics naturally: "Earlier you mentioned risks - are you looking to..."
-- Build on established context rather than starting fresh each time
-
-## Important Notes
-- Never use keyword matching - rely on semantic understanding
-- When uncertain, always ask rather than guess
-- Keep clarifying questions conversational and helpful
-- Consider the user's expertise level in your language choices
-"""
-
     try:
-        # Get LLM response for intent classification
         response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
+        routing_decision = response_content.strip().lower()
         
-        # Parse the JSON response
-        content = response_content.strip()
-        if content.startswith("```json") and content.endswith("```"):
-            content = content[7:-3].strip()
-        elif content.startswith("```") and content.endswith("```"):
-            content = content[3:-3].strip()
-        
-        # Extract JSON
-        try:
-            result = json.loads(content)
-        except json.JSONDecodeError:
-            # Fallback: try to find JSON in response
-            start = content.find('{')
-            end = content.rfind('}') + 1
-            if start != -1 and end > start:
-                result = json.loads(content[start:end])
-            else:
-                # Ultimate fallback - ask for clarification
-                result = {
-                    "action": "clarify",
-                    "domain": None,
-                    "confidence": 0.0,
-                    "reasoning": "Could not parse intent",
-                    "clarifying_question": "I want to make sure I understand what you're looking for. Could you tell me more about what specific task I can help you with regarding risk management, security controls, or compliance?"
-                }
-        
-        action = result.get("action", "clarify")
-        domain = result.get("domain")
-        clarifying_question = result.get("clarifying_question", "")
-        reasoning = result.get("reasoning", "")
-        confidence = result.get("confidence", 0.0)
-        
-        print(f"DEBUG: Orchestrator - Action: {action}, Domain: {domain}, Confidence: {confidence}")
-        print(f"DEBUG: Orchestrator - Reasoning: {reasoning}")
-        
-        # Handle the decision
-        if action == "route" and domain and confidence >= 0.8:
-            # Route to the specified domain
-            if domain == "risk_domain":
-                return {
-                    "input": state["input"],
-                    "output": "",
-                    "conversation_history": conversation_history,
-                    "risk_context": risk_context,
-                    "user_data": user_data,
-                    "risk_generation_requested": False,
-                    "preference_update_requested": False,
-                    "risk_register_requested": False,
-                    "risk_profile_requested": False,
-                    "matrix_recommendation_requested": False,
-                    "is_audit_related": False,
-                    "is_risk_related": True,
-                    "is_control_related": False,
-                    "is_knowledge_related": False
-                }
-            elif domain == "control_domain":
-                return {
-                    "input": state["input"],
-                    "output": "",
-                    "conversation_history": conversation_history,
-                    "risk_context": risk_context,
-                    "user_data": user_data,
-                    "risk_generation_requested": False,
-                    "preference_update_requested": False,
-                    "risk_register_requested": False,
-                    "risk_profile_requested": False,
-                    "matrix_recommendation_requested": False,
-                    "is_audit_related": False,
-                    "is_risk_related": False,
-                    "is_control_related": True,
-                    "is_knowledge_related": False
-                }
-            elif domain == "knowledge_domain":
-                return {
-                    "input": state["input"],
-                    "output": "",
-                    "conversation_history": conversation_history,
-                    "risk_context": risk_context,
-                    "user_data": user_data,
-                    "risk_generation_requested": False,
-                    "preference_update_requested": False,
-                    "risk_register_requested": False,
-                    "risk_profile_requested": False,
-                    "matrix_recommendation_requested": False,
-                    "is_audit_related": False,
-                    "is_risk_related": False,
-                    "is_control_related": False,
-                    "is_knowledge_related": True
-                }
-            elif domain == "audit_domain":
-                return {
-                    "input": state["input"],
-                    "output": "",
-                    "conversation_history": conversation_history,
-                    "risk_context": risk_context,
-                    "user_data": user_data,
-                    "risk_generation_requested": False,
-                    "preference_update_requested": False,
-                    "risk_register_requested": False,
-                    "risk_profile_requested": False,
-                    "matrix_recommendation_requested": False,
-                    "is_audit_related": True,
-                    "is_risk_related": False,
-                    "is_control_related": False,
-                    "is_knowledge_related": False
-                }
-        
-        # Default to clarification - ask the clarifying question
-        if not clarifying_question:
-            clarifying_question = "I want to make sure I provide the most helpful guidance. Could you tell me more about what specific aspect of risk management, security controls, or compliance you'd like help with?"
-        
-        # Update conversation history with clarifying question
-        updated_history = conversation_history + [
-            {"user": user_input, "assistant": clarifying_question}
-        ]
-        
-        # Return with clarifying question as output
-        return {
-            "input": state["input"],
-            "output": clarifying_question,
-            "conversation_history": updated_history,
-            "risk_context": risk_context,
-            "user_data": user_data,
-            "risk_generation_requested": False,
-            "preference_update_requested": False,
-            "risk_register_requested": False,
-            "risk_profile_requested": False,
-            "matrix_recommendation_requested": False,
-            "is_audit_related": False,
-            "is_risk_related": False,
-            "is_control_related": False,
-            "is_knowledge_related": False
-        }
-        
+        # Validate the routing decision and set appropriate flags
+        if "audit_facilitator" in routing_decision:
+            return {
+                "input": state["input"],
+                "output": "",
+                "conversation_history": conversation_history,
+                "risk_context": risk_context,
+                "user_data": user_data,
+                "risk_generation_requested": False,
+                "preference_update_requested": False,
+                "risk_register_requested": False,
+                "risk_profile_requested": False,
+                "matrix_recommendation_requested": False,
+                "is_audit_related": True,
+                "is_risk_related": False
+            }
+        elif "risk_node" in routing_decision:
+            return {
+                "input": state["input"],
+                "output": "",
+                "conversation_history": conversation_history,
+                "risk_context": risk_context,
+                "user_data": user_data,
+                "risk_generation_requested": False,
+                "preference_update_requested": False,
+                "risk_register_requested": False,
+                "risk_profile_requested": False,
+                "matrix_recommendation_requested": False,
+                "is_audit_related": False,
+                "is_risk_related": True
+            }
+        else:
+            # Default to ISO auditor for any unrecognized response
+            print(f"Unrecognized routing decision: '{routing_decision}', defaulting to knowledge_node")
+            return {
+                "input": state["input"],
+                "output": "",
+                "conversation_history": conversation_history,
+                "risk_context": risk_context,
+                "user_data": user_data,
+                "risk_generation_requested": False,
+                "preference_update_requested": False,
+                "risk_register_requested": False,
+                "risk_profile_requested": False,
+                "matrix_recommendation_requested": False,
+                "is_audit_related": False,
+                "is_risk_related": False,
+                "is_knowledge_related": True
+            }
     except Exception as e:
-        print(f"Error in orchestrator_node: {str(e)}")
-        # Fallback to friendly clarification
-        clarification_response = "I encountered an issue understanding your request. Could you help me by describing what specific task you'd like assistance with - whether it's related to risk assessment, security controls, or compliance guidance?"
-        
-        updated_history = conversation_history + [
-            {"user": user_input, "assistant": clarification_response}
-        ]
-        
+        print(f"Error in orchestrator: {e}")
+        # Default to ISO auditor if classification fails
         return {
             "input": state["input"],
-            "output": clarification_response,
-            "conversation_history": updated_history,
+            "output": "",
+            "conversation_history": conversation_history,
             "risk_context": risk_context,
             "user_data": user_data,
             "risk_generation_requested": False,
@@ -2164,148 +1356,59 @@ User: "What controls do I need?"
             "matrix_recommendation_requested": False,
             "is_audit_related": False,
             "is_risk_related": False,
-            "is_control_related": False,
-            "is_knowledge_related": False
+            "is_knowledge_related": True
         }
-    
-@traceable(project_name=LANGSMITH_PROJECT_NAME, name="knowledge_node")
+
+
 def knowledge_node(state: LLMState):
-    """Conversational ISO 27001 and information security knowledge assistant"""
+    """Node for handling ISO 27001 and information security knowledge-related queries"""
     print("Knowledge Node Activated")
-    
-    user_input = state["input"]
-    conversation_history = state.get("conversation_history", [])
-    risk_context = state.get("risk_context", {})
-    user_data = state.get("user_data", {})
-    
-    # Industry-standard conversational prompt for knowledge assistance
-    system_prompt = f"""# ISO 27001:2022 Knowledge Assistant
-
-## Role
-You are a conversational ISO 27001:2022 expert and information security consultant. Your primary job is to provide accurate, helpful guidance on ISO/IEC 27001:2022 standards, information security management, and compliance topics.
-
-## Knowledge Source
-You have access to the complete ISO 27001:2022 dataset below. For any questions about specific clauses, subclauses, or Annex A controls, you MUST answer from this authoritative source:
-
-{ISO_27001_KNOWLEDGE}
-
-## Response Approach
-1. **Conversational Style**: Be helpful, professional, and educational
-2. **Accuracy First**: Always use the provided dataset for specific ISO references
-3. **Context Awareness**: Consider the user's organizational context and conversation history
-4. **Practical Focus**: Provide actionable guidance, not just theoretical information
-5. **Educational Value**: Help users understand WHY things matter, not just WHAT they are
-
-## Task Guidelines
-
-### For Specific Clause/Control Queries:
-When users ask about specific clauses (e.g., "5.2", "Clause 7.5") or Annex A controls (e.g., "A.5.23", "A.8.11"):
-- Look up the exact reference in the dataset
-- Provide: ID, title, description (if available)
-- For top-level clauses: list all subclauses with IDs and titles
-- For Annex A domains: list all controls with IDs and titles  
-- If description is missing from dataset, provide relevant context based on the title
-
-### For General ISO 27001 Questions:
-When users ask broader questions about ISO 27001 (e.g., "What is ISO 27001?", "How does certification work?"):
-- Provide concise, practical answers using general ISO knowledge
-- When relevant, point to specific clauses or Annex A controls from the dataset
-- Include a "See also" section referencing applicable dataset entries
-
-### For Educational/Guidance Requests:
-When users need help understanding concepts or implementation:
-- Explain concepts clearly with practical examples
-- Connect theory to real-world application
-- Suggest related clauses or controls from the dataset
-- Offer implementation guidance and best practices
-
-## Response Structure
-For specific lookups, use this format:
-**[Clause/Control ID]: [Title]**
-[Description/explanation]
-
-For subclauses or controls under a domain:
-- **[ID]**: [Title]
-- **[ID]**: [Title]
-[etc.]
-
-For general guidance, structure responses with:
-- Clear explanation of the concept
-- Practical examples or applications  
-- Related references from the dataset (when applicable)
-- Next steps or recommendations
-
-## Conversational Elements
-- Ask follow-up questions when helpful: "Would you like me to explain how this applies to your [industry/organization]?"
-- Reference conversation context: "Building on what we discussed about risks..."
-- Offer related information: "You might also be interested in..."
-- Provide implementation tips: "A practical way to implement this is..."
-- Connect to user's context when known
-
-## Error Handling
-- If a specific ID isn't found in the dataset: "I couldn't find that exact reference in the ISO 27001:2022 dataset. The closest match would be..."
-- For unclear queries: Ask clarifying questions to better understand their need
-- Never fabricate clause numbers, titles, or descriptions not in the dataset
-
-## Example Responses
-
-### Specific Clause Query:
-User: "What does clause 5.2 say?"
-Response: "**5.2: Information security policy**
-[Include description from dataset]
-
-This clause requires your organization to establish a comprehensive information security policy that demonstrates management commitment and provides a framework for setting security objectives. 
-
-Would you like me to explain how to develop an effective information security policy, or are you interested in related controls from Annex A that support policy implementation?"
-
-### General Knowledge Query:
-User: "What is risk treatment in ISO 27001?"
-Response: "Risk treatment in ISO 27001 refers to the process of selecting and implementing measures to modify risk levels. The standard defines four main risk treatment options:
-
-1. **Risk Modification** - Implement controls to reduce likelihood or impact
-2. **Risk Retention** - Accept the risk as-is (often for low-level risks)
-3. **Risk Avoidance** - Eliminate the risk by avoiding the activity
-4. **Risk Sharing** - Transfer risk through insurance, outsourcing, etc.
-
-**See also from the dataset:**
-- **Clause 6.1.3**: Risk treatment process requirements
-- **Annex A.5**: Organizational controls for risk treatment
-- **Clause 8.1**: Operational planning for risk treatment
-
-Would you like me to elaborate on any specific risk treatment approach or explain how to document your risk treatment decisions?"
-
-## Key Principles
-- Maintain conversational, helpful tone throughout
-- Always verify information against the provided dataset for ISO-specific content
-- Provide practical, actionable guidance beyond just definitions  
-- Build understanding progressively through the conversation
-- Connect information security concepts to business value and outcomes
-"""
-
     try:
+        user_input = state["input"]
+        conversation_history = state.get("conversation_history", [])
+        risk_context = state.get("risk_context", {})
+        user_data = state.get("user_data", {})
+
+        system_prompt = f"""
+ROLE
+You are an ISO/IEC 27001:2022 assistant. For any question about ISO 27001:2022 clauses, subclauses, or Annex A controls, you MUST answer strictly from the structured dataset provided below. For general questions about ISO 27001:2022 (not asking for specific clause/control text), you should still answer—succinctly—using general ISO knowledge, and, when helpful, point to the most relevant entries in the dataset.
+
+SOURCE OF TRUTH (read-only)
+{ISO_27001_KNOWLEDGE}
+# The above JSON is the canonical dataset. Do not invent entries, numbers, or text that are not present here.
+
+SCOPE & ROUTING
+1) If the user asks about a specific clause number (e.g., "5", "5.2", "Clause 7.5", "6.1.3"):
+   - Look it up under ISO27001_2022 → Clauses.
+   - If a top-level clause (4-10) is requested, return its id, title, description, and list all subclauses with ids + titles from the dataset.
+   - If a subclause is requested, return its id + title; if the dataset lacks a description for that subclause provide one from your end, it should be relevant to that subclause title
+
+2) If the user asks about Annex A (e.g., "A.5", "A.8.24", "Annex A technological controls"):
+   - Look it up under ISO27001_2022 → Annex_A.
+   - If an Annex A domain (A.5-A.8) is requested, return its id, title, description, and list all control ids + titles (with descriptions if present).
+   - If a specific control (e.g., A.5.23, A.8.11) is requested, return the control id, title, description, and the parent domain (id + title).
+
+3) If the question is generally related to ISO/IEC 27001:2022 but not specifically about clauses/Annex A (e.g., "What is ISO 27001:2022?", "How does certification work?", "What is risk treatment?"):
+   - Provide a concise answer based on general ISO knowledge.
+   - When relevant, add a short "See also" section pointing to applicable clauses/subclauses or Annex A domains/controls from the dataset.
+
+4) If the question is completely unrelated to ISO/IEC 27001:2022 (e.g., general conversation, other topics):
+   - Politely redirect the user to ask ISO 27001:2022 related questions.
+   - Example: "I'm specialized in ISO/IEC 27001:2022 compliance guidance. Please ask me questions about information security management systems, ISO 27001 clauses, Annex A controls, or related compliance topics."
+
+5) If the user asks for something not found in the dataset (e.g., an id that doesn't exist in the JSON):
+   - Say you couldn't find that exact id in the provided dataset and offer the nearest relevant entries (e.g., the parent clause/domain) if applicable.
+   - Do NOT fabricate ids, titles, or descriptions.
+
+MATCHING & NORMALIZATION
+- Treat inputs like "clause 5.2", "5.2", "Leadership policy", or "information security policy" as potential matches to dataset items (e.g., 5.2 → "Information security policy"; "information security policy" → likely 5.2 or A.5.1 depending on context).
+- Normalize spacing, case, and punctuation. Accept both "Annex A 8.24" and "A.8.24".
+- Prefer exact id matches first; if none, resolve by best title/keyword match and explain mapping in one short sentence ("Interpreting '…' as …").
+
+
+        """
+        
         response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
-
-        # Add conversational follow-up suggestions based on the response content
-        follow_up_prompt = f"""Based on your response about ISO 27001, suggest 1-2 brief, natural follow-up questions or topics that might be helpful to the user. Keep suggestions conversational and relevant to their query.
-
-Your response was: {response_content[:300]}...
-User's original question: {user_input}
-
-Provide follow-up suggestions in this format:
-**Follow-up suggestions:**
-- [Question/topic 1]
-- [Question/topic 2] (if applicable)
-
-Keep suggestions brief and natural. Only include if genuinely helpful."""
-
-        # Generate follow-up suggestions
-        try:
-            follow_up_content = make_llm_call_with_history(follow_up_prompt, "", [])
-            if "Follow-up suggestions:" in follow_up_content and len(follow_up_content.strip()) < 200:
-                response_content += f"\n\n{follow_up_content.strip()}"
-        except:
-            # Skip follow-ups if there's any issue generating them
-            pass
 
         # Update conversation history
         updated_history = conversation_history + [
@@ -2313,77 +1416,35 @@ Keep suggestions brief and natural. Only include if genuinely helpful."""
         ]
         
         return {
-            "input": state["input"],
             "output": response_content,
             "conversation_history": updated_history,
             "risk_context": risk_context,
-            "user_data": user_data,
-            "risk_generation_requested": False,
-            "preference_update_requested": False,
-            "risk_register_requested": False,
-            "risk_profile_requested": False,
-            "matrix_recommendation_requested": False,
-            "is_audit_related": False,
-            "is_risk_related": False,
-            "is_control_related": False,
-            "is_knowledge_related": False
+            "user_data": user_data
         }
-        
     except Exception as e:
-        print(f"Error in knowledge_node: {str(e)}")
-        
-        # Provide helpful fallback response
-        error_response = """I'd be happy to help with ISO 27001:2022 guidance and information security questions. 
-
-I can assist with:
-- Specific clause explanations (e.g., "What does clause 6.1 cover?")
-- Annex A control details (e.g., "Tell me about A.8.24")
-- Implementation guidance and best practices
-- Information security management concepts
-- Compliance and certification questions
-
-What specific aspect of ISO 27001 or information security would you like to explore?"""
-        
-        updated_history = conversation_history + [
-            {"user": user_input, "assistant": error_response}
-        ]
-        
         return {
-            "input": state["input"],
-            "output": error_response,
-            "conversation_history": updated_history,
-            "risk_context": risk_context,
-            "user_data": user_data,
-            "risk_generation_requested": False,
-            "preference_update_requested": False,
-            "risk_register_requested": False,
-            "risk_profile_requested": False,
-            "matrix_recommendation_requested": False,
-            "is_audit_related": False,
-            "is_risk_related": False,
-            "is_control_related": False,
-            "is_knowledge_related": False
+            "output": f"I apologize, but I encountered an error while processing your information security query: {str(e)}. Please try again.",
+            "conversation_history": state.get("conversation_history", []),
+            "risk_context": state.get("risk_context", {}),
+            "user_data": state.get("user_data", {})
         }
 
-# Build the graph with the state schema
+# 6. Build the graph with the state schema
 builder = StateGraph(LLMState)
 builder.add_node("orchestrator", orchestrator_node)
 builder.add_node("risk_node", risk_node)
 builder.add_node("risk_generation", risk_generation_node)
+builder.add_node("preference_update", preference_update_node)
 builder.add_node("risk_register", risk_register_node)
+builder.add_node("risk_profile", risk_profile_node)
 builder.add_node("matrix_recommendation", matrix_recommendation_node)
 builder.add_node("knowledge_node", knowledge_node)
-builder.add_node("control_node", control_node)
-builder.add_node("generate_control_node", control_generate_node)
-builder.add_node("control_library_node", control_library_node)
-builder.add_node("control_knowledge_node", control_knowledge_node)
 builder.set_entry_point("orchestrator")
 
-# Updated orchestrator routing function 
+# Add conditional routing from orchestrator
 def orchestrator_routing(state: LLMState) -> str:
-    """Route based on domain flags set by conversational orchestrator"""
     if state.get("is_audit_related", False):
-        return "audit_facilitator"  # Will route to risk_node temporarily until implemented
+        return "audit_facilitator"  # Will be implemented later
     elif state.get("is_risk_related", False):
         return "risk_node"
     elif state.get("is_control_related", False):
@@ -2391,96 +1452,48 @@ def orchestrator_routing(state: LLMState) -> str:
     elif state.get("is_knowledge_related", False):
         return "knowledge_node"
     else:
-        # If no flags set, orchestrator is handling conversation directly
-        return END
+        return "knowledge_node"  # Default to existing LLM node for risk management queries
 
-# Updated control routing function (already fixed above)
-def route_control_three_way(state: LLMState) -> str:
-    """Route to appropriate control sub-domain or continue conversation"""
-    control_target = state.get("control_target", "control_library_node")
-    
-    print(f"DEBUG: Control three-way routing - target: {control_target}")
-    
-    # Handle clarification state - return to control node for continued conversation
-    if control_target == "clarify":
-        # Check if we have an output (clarifying question) - if so, end the conversation
-        if state.get("output"):
-            return END
-        else:
-            # Continue in control node for another round of clarification
-            return "control_node"
-    
-    # Route to appropriate sub-domain
-    if control_target == "generate_control_node":
-        return "generate_control_node"
-    elif control_target == "control_knowledge_node":
-        return "control_knowledge_node"
-    elif control_target == "control_library_node":
-        return "control_library_node"
-    
-    # Default fallback
-    print(f"DEBUG: Unknown control target '{control_target}', defaulting to control_library_node")
-    return "control_library_node"
-
-# Updated risk routing function
+# Add conditional edge based on risk generation flag
 def should_generate_risks(state: LLMState) -> str:
-    """Route risk sub-domain requests or end if handled in risk_node"""
-    
-    # Check if risk_node handled the request directly (general guidance)
-    if state.get("output"):
-        return END
-    
-    # Route to specific risk sub-domains
     if state.get("risk_generation_requested", False):
         return "risk_generation"
+    elif state.get("preference_update_requested", False):
+        return "preference_update"
     elif state.get("risk_register_requested", False):
         return "risk_register"
+    elif state.get("risk_profile_requested", False):
+        return "risk_profile"
     elif state.get("matrix_recommendation_requested", False):
         return "matrix_recommendation"
-    
-    # End if no specific routing requested
-    return END
+    return "end"
 
-# Add orchestrator routing with updated logic
+# Add orchestrator routing
 builder.add_conditional_edges("orchestrator", orchestrator_routing, {
-    "audit_facilitator": "risk_node",  # Temporary routing until audit_facilitator is implemented
-    "knowledge_node": "knowledge_node",
-    "control_node": "control_node", 
-    "risk_node": "risk_node",
-    END: END  # For when orchestrator handles conversation directly
+    "audit_facilitator": "risk_node",  # Temporary routing to risk_node until audit_facilitator is implemented
+    "knowledge_node": "knowledge_node",  # Route to knowledge node for ISO 27001 related queries
+    "risk_node": "risk_node"
 })
 
-# Add control sub-domain routing with all three options
-builder.add_conditional_edges("control_node", route_control_three_way, {
-    "generate_control_node": "generate_control_node",
-    "control_library_node": "control_library_node", 
-    "control_knowledge_node": "control_knowledge_node",
-    "control_node": "control_node",  # For continued clarification
-    END: END  # For when control_node provides direct response
-})
-
-# Add risk sub-domain routing
 builder.add_conditional_edges("risk_node", should_generate_risks, {
     "risk_generation": "risk_generation",
-    "risk_register": "risk_register", 
+    "preference_update": "preference_update",
+    "risk_register": "risk_register",
+    "risk_profile": "risk_profile",
     "matrix_recommendation": "matrix_recommendation",
-    END: END  # For when risk_node provides direct response
+    "end": END
 })
-
-# Terminal edges for all sub-domain nodes
 builder.add_edge("risk_generation", END)
+builder.add_edge("preference_update", END)
 builder.add_edge("risk_register", END)
+builder.add_edge("risk_profile", END)
 builder.add_edge("matrix_recommendation", END)
 builder.add_edge("knowledge_node", END)
-builder.add_edge("generate_control_node", END)
-builder.add_edge("control_library_node", END)
-builder.add_edge("control_knowledge_node", END)
 
 # Add memory to the graph
 memory = MemorySaver()
 graph = builder.compile(checkpointer=memory)
 
-@traceable(project_name=LANGSMITH_PROJECT_NAME, name="run_agent")
 def run_agent(message: str, conversation_history: list = None, risk_context: dict = None, user_data: dict = None, thread_id: str = "default_session"):
     if conversation_history is None:
         conversation_history = []
@@ -2501,31 +1514,42 @@ def run_agent(message: str, conversation_history: list = None, risk_context: dic
         "risk_profile_requested": False,
         "matrix_recommendation_requested": False,
         "is_audit_related": False,
-        "is_risk_related": False,
-        "is_control_related": False,
-        "is_knowledge_related": False,
-        "control_generation_requested": False,
-        "control_parameters": {},
-        "control_retrieved_context": {},
-        "generated_controls": [],
-        "selected_controls": [],
-        "pending_selection": False,
-        "control_session_id": "",
-        "control_target": "",
-        "control_query": "",
-        "control_filters": {},
-        "risk_description": ""
+        "is_risk_related": False
     }
     
     # Use thread_id for memory persistence within the session
     config = {"configurable": {"thread_id": thread_id}}
     result = graph.invoke(state, config)
-    print(f"DEBUG: Final result - output length: {len(result.get('output', ''))}")
-    print(f"DEBUG: Final result - risk_context keys: {list(result.get('risk_context', {}).keys())}")
-    if 'generated_controls' in result.get('risk_context', {}):
-        print(f"DEBUG: Final result has {len(result['risk_context']['generated_controls'])} controls")
     return result["output"], result["conversation_history"], result["risk_context"], result["user_data"]
 
+def get_risk_assessment_summary(conversation_history: list, risk_context: dict) -> str:
+    """Generate a summary of the risk assessment session"""
+    try:
+        llm = get_llm()
+
+        # Format conversation for summary
+        conversation_text = "\n".join([
+            f"User: {msg['user']}\nAssistant: {msg['assistant']}" 
+            for msg in conversation_history
+        ])
+        
+        prompt = f"""Based on the following risk management conversation, provide a concise summary of:
+        1. Key risks identified
+        2. Compliance requirements discussed
+        3. Recommendations provided
+        4. Next steps suggested
+
+        Conversation:
+        {conversation_text}
+
+        Risk Context: {risk_context}
+
+        Please provide a structured summary that could be used for reporting purposes."""
+        
+        response = llm.invoke(prompt)
+        return response.content
+    except Exception as e:
+        return "Unable to generate risk assessment summary due to an error."
 
 def get_finalized_risks_summary(finalized_risks: list, organization_name: str, location: str, domain: str) -> str:
     """Generate a comprehensive summary based on finalized risks"""

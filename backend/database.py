@@ -4,10 +4,7 @@ from typing import List, Optional, Any
 from pymongo import MongoClient
 from bson import ObjectId
 from vector_index import VectorIndexService 
-from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisk, FinalizedRisks, FinalizedRisksResponse, Control, AnnexAMapping
-from uuid import uuid4
-from openai import OpenAI
-import json
+from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisk, FinalizedRisks, FinalizedRisksResponse
 
 # Database result wrapper class
 class DatabaseResult:
@@ -25,9 +22,7 @@ db = client.isoriskagent
 generated_risks_collection = db.generated_risks
 finalized_risks_collection = db.finalized_risks
 users_collection = db.users
-risk_profiles_collection = db.risk_profiles
-controls_collection = db.controls
-control_sessions_collection = db.control_sessions
+risk_profiles_collection = db.risk_profiles # Added for risk profile collection
 
 class RiskDatabaseService:
     @staticmethod
@@ -1130,7 +1125,11 @@ class RiskProfileDatabaseService:
     @staticmethod
     async def generate_matrix_recommendation_with_llm(matrix_size: str, organization_name: str, location: str, domain: str, user_id: str = None) -> DatabaseResult:
         """Generate matrix recommendation using LLM based on organization context and user's existing risk profiles"""
-        try:       
+        try:
+            from openai import OpenAI
+            import json
+            import os
+            
             api_key = os.getenv("OPENAI_API_KEY")
             if not api_key:
                 return DatabaseResult(False, "OpenAI API key not configured")
@@ -1240,188 +1239,3 @@ IMPORTANT: Return ONLY valid JSON. Do not include any other text."""
             return DatabaseResult(False, f"Error parsing JSON response: {str(e)}")
         except Exception as e:
             return DatabaseResult(False, f"Error generating matrix recommendation: {str(e)}")
-
-def _to_str_id(obj):
-    if isinstance(obj, dict):
-        return {k: _to_str_id(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_to_str_id(x) for x in obj]
-    if isinstance(obj, ObjectId):
-        return str(obj)
-    return obj
-
-class ControlsDatabaseService:
-    @staticmethod
-    def get_user_context(user_id: str) -> dict:
-        user = users_collection.find_one({"username": user_id}) or {}
-        return _to_str_id(user)
-
-    @staticmethod
-    def _flatten_risks_docs(docs: list, user_id: str) -> list:
-        """Flattens both `finalized_risks` and `generated_risks` documents into a list of risk dicts with `id`."""
-        risks = []
-        for d in docs:
-            d = _to_str_id(d)
-            for r in d.get("risks", []):
-                r = _to_str_id(r)
-                if "id" not in r:
-                    # Prefer nested _id else parent _id
-                    r["id"] = r.get("_id") or d.get("_id") or ""
-                r["user_id"] = user_id
-                r.setdefault("organization_name", d.get("organization_name", ""))
-                r.setdefault("location", d.get("location", ""))
-                r.setdefault("domain", d.get("domain", ""))
-                r.pop("_id", None)
-                risks.append(r)
-        return risks
-
-    @staticmethod
-    def get_user_risks(user_id: str, exclude_with_controls: bool = False) -> list:
-        # Try finalized first; if none, fall back to generated
-        fin_docs = list(finalized_risks_collection.find({"user_id": user_id}))
-        gen_docs = list(generated_risks_collection.find({"user_id": user_id}))
-        all_risks = ControlsDatabaseService._flatten_risks_docs(fin_docs or gen_docs, user_id)
-
-        if exclude_with_controls:
-            # Get all risk IDs that are referenced in any control's linked_risk_ids
-            controls_with_risks = list(controls_collection.find(
-                {"user_id": user_id, "linked_risk_ids": {"$ne": []}}, 
-                {"linked_risk_ids": 1}
-            ))
-            risk_ids_with_controls = set()
-            for control in controls_with_risks:
-                risk_ids_with_controls.update(control.get("linked_risk_ids", []))
-            
-            all_risks = [r for r in all_risks if r.get("id") not in risk_ids_with_controls]
-
-        return all_risks
-
-    @staticmethod
-    def get_risk_by_id(risk_id: str, user_id: str) -> dict | None:
-        fin_docs = list(finalized_risks_collection.find({"user_id": user_id}))
-        gen_docs = list(generated_risks_collection.find({"user_id": user_id}))
-        all_risks = ControlsDatabaseService._flatten_risks_docs(fin_docs + gen_docs, user_id)
-        for r in all_risks:
-            if str(r.get("id")) == str(risk_id):
-                return r
-        return None
-
-    @staticmethod
-    def get_controls_by_risk(risk_id: str, user_id: str) -> list:
-        """Get controls by linked risk ID - updated to use new Control model"""
-        return _to_str_id(list(controls_collection.find({
-            "user_id": user_id,
-            "linked_risk_ids": {"$in": [risk_id]}
-        })))
-
-    @staticmethod
-    def get_controls_by_annex(annex: str, user_id: str) -> list:
-        """Get controls by Annex A mapping - updated to use new Control model"""
-        return _to_str_id(list(controls_collection.find({
-            "user_id": user_id,
-            "annexA_map": {"$elemMatch": {"id": {"$regex": f"^{annex}", "$options": "i"}}}
-        })))
-
-    @staticmethod
-    def get_controls_by_category(category: str, user_id: str) -> list:
-        """Get controls that are linked to risks of a specific category"""
-        risks = ControlsDatabaseService.get_user_risks(user_id)
-        risk_ids = [r["id"] for r in risks if r.get("category") == category]
-        return _to_str_id(list(controls_collection.find({
-            "user_id": user_id, 
-            "linked_risk_ids": {"$in": risk_ids}
-        })))
-
-    @staticmethod
-    def save_controls(controls: list) -> list[str]:
-        """Save controls to database, supporting both new and legacy formats"""
-        ids = []
-        for c in controls:
-            c = dict(c)
-            c["_id"] = str(uuid4())
-            c["created_at"] = datetime.utcnow()
-            c["updated_at"] = datetime.utcnow()
-            ids.append(c["_id"])
-            controls_collection.insert_one(c)
-        return ids
-    
-    @staticmethod
-    def get_control_by_id(control_id: str, user_id: str) -> dict | None:
-        """Get a specific control by its control_id"""
-        control = controls_collection.find_one({"control_id": control_id, "user_id": user_id})
-        return _to_str_id(control) if control else None
-    
-    @staticmethod
-    def get_all_user_controls(user_id: str) -> list:
-        """Get all controls for a user"""
-        return _to_str_id(list(controls_collection.find({"user_id": user_id})))
-
-    @staticmethod
-    def get_controls_by_uids(user_id: str, uids: list[str]) -> list:
-        """Fetch controls by their _id values for a user."""
-        if not uids:
-            return []
-        return _to_str_id(list(controls_collection.find({"user_id": user_id, "_id": {"$in": list(uids)}})))
-    
-    @staticmethod
-    def update_control(control_id: str, user_id: str, updates: dict) -> bool:
-        """Update a specific control"""
-        updates["updated_at"] = datetime.utcnow()
-        result = controls_collection.update_one(
-            {"control_id": control_id, "user_id": user_id}, 
-            {"$set": updates}
-        )
-        return result.modified_count > 0
-    
-    @staticmethod
-    def delete_control(control_id: str, user_id: str) -> bool:
-        """Delete a specific control"""
-        result = controls_collection.delete_one({"control_id": control_id, "user_id": user_id})
-        return result.deleted_count > 0
-    
-    @staticmethod
-    def get_controls_by_status(status: str, user_id: str) -> list:
-        """Get controls filtered by status"""
-        return _to_str_id(list(controls_collection.find({"status": status, "user_id": user_id})))
-    
-    @staticmethod
-    def get_controls_by_linked_risk(risk_id: str, user_id: str) -> list:
-        """Get controls that are linked to a specific risk ID"""
-        return _to_str_id(list(controls_collection.find({
-            "linked_risk_ids": {"$in": [risk_id]}, 
-            "user_id": user_id
-        })))
-    
-    @staticmethod
-    def search_controls(query: str, user_id: str) -> list:
-        """Search controls by text in title, description, or objective"""
-        search_filter = {
-            "$and": [
-                {"user_id": user_id},
-                {
-                    "$or": [
-                        {"control_title": {"$regex": query, "$options": "i"}},
-                        {"control_description": {"$regex": query, "$options": "i"}},
-                        {"objective": {"$regex": query, "$options": "i"}},
-                        {"owner_role": {"$regex": query, "$options": "i"}}
-                    ]
-                }
-            ]
-        }
-        return _to_str_id(list(controls_collection.find(search_filter)))
-
-    @staticmethod
-    def save_session(session_data: dict) -> str:
-        sid = str(uuid4())
-        session_data["_id"] = sid
-        control_sessions_collection.insert_one(session_data)
-        return sid
-
-    @staticmethod
-    def get_session(session_id: str) -> dict | None:
-        doc = control_sessions_collection.find_one({"_id": session_id})
-        return _to_str_id(doc) if doc else None
-
-    @staticmethod
-    def update_session(session_id: str, data: dict) -> None:
-        control_sessions_collection.update_one({"_id": session_id}, {"$set": data})

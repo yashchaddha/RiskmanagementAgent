@@ -1,0 +1,78 @@
+{
+    "family": "CNAgenticAppProdTaskDefinition69137BF9",
+    "networkMode": "awsvpc",
+    "containerDefinitions": [
+        {
+            "name": "web",
+            "image": "760974246385.dkr.ecr.us-east-1.amazonaws.com/complynexus-agentic:${BUILD}",
+            "portMappings": [
+                {
+                    "containerPort": 8000,
+                    "hostPort": 8000,
+                    "protocol": "tcp"
+                }
+            ],
+            "essential": true,
+            "secrets": [
+                {
+                    "name": "OPENAI_API_KEY",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:760974246385:secret:cn-agentic-prod-ZCNN9g:OPENAI_API_KEY::"
+                },
+                {
+                    "name": "MONGODB_URI",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:760974246385:secret:cn-agentic-prod-ZCNN9g:MONGODB_URI::"
+                },
+                {
+                    "name": "DATABASE_NAME",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:760974246385:secret:cn-agentic-prod-ZCNN9g:DATABASE_NAME::"
+                },
+                {
+                    "name": "JWT_SECRET",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:760974246385:secret:cn-agentic-prod-ZCNN9g:JWT_SECRET::"
+                },
+                {
+                    "name": "ZILLIZ_TOKEN",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:760974246385:secret:cn-agentic-prod-ZCNN9g:ZILLIZ_TOKEN::"
+                },
+                {
+                    "name": "ZILLIZ_URI",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:760974246385:secret:cn-agentic-prod-ZCNN9g:ZILLIZ_URI::"
+                },
+                {
+                    "name": "LANGSMITH_TRACING",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:760974246385:secret:cn-agentic-prod-ZCNN9g:LANGSMITH_TRACING::"
+                },
+                {
+                    "name": "LANGSMITH_ENDPOINT",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:760974246385:secret:cn-agentic-prod-ZCNN9g:LANGSMITH_ENDPOINT::"
+                },
+                {
+                    "name": "LANGSMITH_API_KEY",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:760974246385:secret:cn-agentic-prod-ZCNN9g:LANGSMITH_API_KEY::"
+                },
+                {
+                    "name": "LANGSMITH_PROJECT",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:760974246385:secret:cn-agentic-prod-ZCNN9g:LANGSMITH_PROJECT::"
+                }
+            ],
+            "linuxParameters": {
+                "initProcessEnabled": true
+            },
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/cn-agentic-prod",
+                    "awslogs-region": "us-east-1",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            }
+        }
+    ],
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "1024",
+    "memory": "2 GB",
+    "taskRoleArn": "arn:aws:iam::760974246385:role/CNAgenticAppProd-TaskDefinitionTaskRoleFD40A61D-gSnk9zdMhkCG",
+    "executionRoleArn": "arn:aws:iam::760974246385:role/CNAgenticAppProd-TaskDefinitionExecutionRole8D61C2F-jLoUljKv8P17"
+}

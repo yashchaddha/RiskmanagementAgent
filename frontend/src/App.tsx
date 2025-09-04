@@ -7,8 +7,8 @@ function App() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem("token"));
 
   useEffect(() => {
-    // Update document title for NexiAgent
-    document.title = "NexiAgent - AI-Powered Risk & Compliance";
+    // Update document title for the Risk Management Agent
+    document.title = "Nexi - AI Powered Risk Assessment Agent";
   }, []);
 
   const handleAuthSuccess = (jwt: string) => {
@@ -21,7 +21,7 @@ function App() {
   };
 
   return (
-    <div className="App">
+    <div className="App" style={{ width: '100%', height: '100vh' }}>
       {!token ? (
         <Auth onAuthSuccess={handleAuthSuccess} />
       ) : (

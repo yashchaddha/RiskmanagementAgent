@@ -51,7 +51,7 @@ export const RiskRegister: React.FC<RiskRegisterProps> = ({ onClose }) => {
         return [];
       }
 
-      const response = await fetch("http://localhost:8000/risks/finalized", {
+      const response = await fetch("https://api.agentic.complynexus.com/risks/finalized", {
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
@@ -106,7 +106,7 @@ export const RiskRegister: React.FC<RiskRegisterProps> = ({ onClose }) => {
       return;
     }
     try {
-      const response = await fetch(`http://localhost:8000/risks/finalized/index/${riskIndex}`, {
+      const response = await fetch(`https://api.agentic.complynexus.com/risks/finalized/index/${riskIndex}`, {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${token}`,

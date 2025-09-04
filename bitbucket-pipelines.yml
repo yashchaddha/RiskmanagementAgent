@@ -1,0 +1,23 @@
+
+pipelines:
+  branches:
+    main:
+      - step:
+          name: Build and publish docker image.
+          image: amazon/aws-cli
+          services:
+            - docker # Enable Docker for your repository
+          script:
+
+            - export REPO="760974246385.dkr.ecr.us-east-1.amazonaws.com"
+            - export IMAGE_NAME="${REPO}/complynexus-agentic:${BITBUCKET_BUILD_NUMBER}"
+            # Build the docker image and push to Dockerhub.
+            - docker build -t "$IMAGE_NAME" .
+            - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REPO"
+            - docker push "$IMAGE_NAME"
+      - step:
+          deployment: Production
+          name: Deploy latest image
+          image: amazon/aws-cli
+          script:
+            - cd scripts && ./deploy.sh

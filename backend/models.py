@@ -2,6 +2,9 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 
+
+
+
 class Risk(BaseModel):
     id: Optional[str] = None
     description: str
@@ -71,34 +74,3 @@ class FinalizedRisksResponse(BaseModel):
     success: bool
     message: str
     data: Optional[FinalizedRisks] = None 
-
-# Annex A mapping model
-class AnnexAMapping(BaseModel):
-    id: str  # e.g., "A.5.29"
-    title: str  # e.g., "Information security during disruption"
-
-# Comprehensive Control model based on new format
-class Control(BaseModel):
-    id: Optional[str] = None  # MongoDB _id
-    control_id: str  # e.g., "C-001" 
-    control_title: str  # e.g., "ICT Readiness & BCP for Regional Failover"
-    control_description: str  # What this control addresses
-    objective: str  # Business objective of the control
-    annexA_map: List[AnnexAMapping]  # List of mapped ISO 27001 Annex A controls
-    linked_risk_ids: List[str]  # Risk IDs this control addresses
-    owner_role: str  # e.g., "SRE Manager"
-    process_steps: List[str]  # Step-by-step implementation process
-    evidence_samples: List[str]  # Examples of evidence for this control
-    metrics: List[str]  # Measurable outcomes/KPIs
-    frequency: str  # How often this control is executed/reviewed
-    policy_ref: str  # Reference to related policy
-    status: str  # e.g., "Implemented", "Planned", "In Progress"
-    rationale: str  # Why this control is necessary
-    assumptions: str  # Any assumptions made
-    user_id: Optional[str] = None  # For multi-tenancy
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-
-class ControlSelection(BaseModel):
-    session_id: str
-    selected_control_ids: List[str]

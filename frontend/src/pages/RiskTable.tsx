@@ -24,6 +24,7 @@ interface RiskTableProps {
   onRiskSelectionChange: (riskId: string, isSelected: boolean) => void;
   onFinalize: (selectedRisks: Risk[]) => void;
   onClose: () => void;
+  isFinalizing?: boolean;
 }
 
 interface UserPreferences {
@@ -35,7 +36,7 @@ interface UserPreferences {
 
 const RISK_CATEGORIES = ["Competition", "External", "Financial", "Innovation", "Internal", "Legal and Compliance", "Operational", "Project Management", "Reputational", "Safety", "Strategic", "Technology"];
 
-export const RiskTable: React.FC<RiskTableProps> = ({ risks, onRiskSelectionChange, onFinalize, onClose }) => {
+export const RiskTable: React.FC<RiskTableProps> = ({ risks, onRiskSelectionChange, onFinalize, onClose, isFinalizing = false }) => {
   const [selectAll, setSelectAll] = useState(true);
   const [userPreferences, setUserPreferences] = useState<UserPreferences>({
     risks_applicable: [],
@@ -45,7 +46,6 @@ export const RiskTable: React.FC<RiskTableProps> = ({ risks, onRiskSelectionChan
   });
 
   const [editedRisks, setEditedRisks] = useState<{ [key: string]: Risk }>({});
-  const [isFinalizing, setIsFinalizing] = useState(false);
 
   // Load user preferences on component mount
   useEffect(() => {
@@ -54,7 +54,7 @@ export const RiskTable: React.FC<RiskTableProps> = ({ risks, onRiskSelectionChan
         const token = localStorage.getItem("token");
         if (!token) return;
 
-        const response = await fetch("http://localhost:8000/user/preferences", {
+        const response = await fetch("https://api.agentic.complynexus.com/user/preferences", {
           headers: {
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
@@ -126,7 +126,7 @@ export const RiskTable: React.FC<RiskTableProps> = ({ risks, onRiskSelectionChan
 
       const backendField = fieldMapping[field] || field;
 
-      const response = await fetch(`http://localhost:8000/risks/${riskIndex}/update`, {
+              const response = await fetch(`https://api.agentic.complynexus.com/risks/${riskIndex}/update`, {
         method: "PUT",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -320,46 +320,31 @@ export const RiskTable: React.FC<RiskTableProps> = ({ risks, onRiskSelectionChan
         </div>
 
         <div className="risk-table-footer">
-          <div></div>
-          <div>
-            <div style={{ display: "flex", gap: "12px" }}>
-              <button
-                className="finalize-btn"
-                onClick={async () => {
-                  const selectedEditedRisks = risks
-                    .map((risk) => {
-                      const editedRisk = editedRisks[risk.id];
-                      return editedRisk || risk;
-                    })
-                    .filter((r) => r.isSelected);
+          <button className="close-table-btn" onClick={onClose}>
+            Close
+          </button>
+          <button
+            className="finalize-btn"
+            onClick={() => {
+              // Use edited risks instead of original risks
+              const selectedEditedRisks = risks
+                .map((risk) => {
+                  const editedRisk = editedRisks[risk.id];
+                  return editedRisk || risk;
+                })
+                .filter((r) => r.isSelected);
 
-                  setIsFinalizing(true);
-                  try {
-                    const ret = (onFinalize as any)(selectedEditedRisks);
-                    if (ret && typeof ret.then === "function") {
-                      await ret;
-                    }
-                  } finally {
-                    setIsFinalizing(false);
-                  }
-                }}
-                disabled={risks.filter((r) => r.isSelected).length === 0 || isFinalizing}
-              >
-                {isFinalizing ? "⏳ Finalising…" : "✅ Finalise Risks"}
-              </button>
-              <button className="close-table-btn" onClick={onClose}>
-                Close
-              </button>
-            </div>
-          </div>
+              console.log("Edited risks being finalized:", selectedEditedRisks); // Debug log
+              console.log("Original risks:", risks); // Debug log
+              console.log("Edited risks state:", editedRisks); // Debug log
+
+              onFinalize(selectedEditedRisks);
+            }}
+            disabled={risks.filter((r) => r.isSelected).length === 0 || isFinalizing}
+          >
+            {isFinalizing ? "Saving Risks..." : "✅ Finalise Risks"}
+          </button>
         </div>
-
-        {isFinalizing && (
-          <div className="risk-table-loading-overlay">
-            <div className="risk-table-spinner"></div>
-            <div>Finalising risks…</div>
-          </div>
-        )}
       </div>
     </div>
   );

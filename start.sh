@@ -55,8 +55,8 @@ sleep 3
 
 # Check if backend started successfully
 if check_port 8000; then
-    echo "✅ Backend server is running on http://localhost:8000"
-    echo "   API Documentation: http://localhost:8000/docs"
+    echo "✅ Backend server is running on https://api.agentic.complynexus.com"
+    echo "   API Documentation: https://api.agentic.complynexus.com/docs"
 else
     echo "❌ Backend server failed to start"
     kill $BACKEND_PID 2>/dev/null
@@ -85,7 +85,7 @@ fi
 echo ""
 echo "🎉 Risk Management Agent is ready!"
 echo "📱 Open http://localhost:5173 in your browser"
-echo "🔧 API Documentation: http://localhost:8000/docs"
+echo "🔧 API Documentation: https://api.agentic.complynexus.com/docs"
 echo ""
 echo "Features available:"
 echo "  • AI-powered risk assessment"

@@ -1,12 +1,15 @@
 import React, { useState, useEffect, useRef } from "react";
 import "./Chatbot.css";
+import logo from "../assets/logo.svg";
 import { RiskTable } from "./RiskTable";
 import { RiskRegister } from "./RiskRegister";
 import { RiskProfileTable } from "./RiskProfileTable";
 import { MatrixPreviewModal } from "./MatrixPreviewModal";
 import { parseRisksFromLLMResponse } from "../utils/riskParser";
-import { ControlTable } from "./ControlTable";
-import type { Control, AnnexAMapping } from "./ControlTable";
+import loaderAnimation from "../assets/loader-animation.gif";
+import badge from "../assets/badge.png";
+import nexiGif from "../assets/nexi.gif";
+import arrowUp from "../assets/arrow-up.png";
 
 interface Message {
   id: string;
@@ -40,23 +43,114 @@ interface RiskContext {
   compliance_requirements?: string[];
 }
 
-interface RiskLevel {
-  level: number;
-  title: string;
-  description: string;
+interface ChatTurn {
+  role: "user" | "assistant" | "system" | string;
+  content: string;
 }
 
-interface RiskProfile {
-  riskType: string;
-  definition: string;
-  likelihoodScale: RiskLevel[];
-  impactScale: RiskLevel[];
-  matrixSize: string;
-}
+interface RiskLevel { level: number; title: string; description: string; }
+interface MatrixProfile { riskType: string; definition: string; likelihoodScale: RiskLevel[]; impactScale: RiskLevel[]; matrixSize: string; }
+interface EditableRiskProfile extends MatrixProfile { isEditing?: boolean }
+interface MatrixPreviewData { matrix_size: string; profiles: MatrixProfile[]; totalProfiles: number }
 
-interface EditableRiskProfile extends RiskProfile {
-  isEditing?: boolean;
-}
+// Global animation state to prevent restarts
+const animationStates = new Map<string, {
+  isAnimating: boolean;
+  currentText: string;
+  timer: number | null;
+}>();
+
+const AnimatedText: React.FC<{ text: string; animate: boolean; onDone?: () => void; onProgress?: () => void; speedMsPerChar?: number; messageId?: string }> = ({ text, animate, onDone, onProgress, speedMsPerChar = 15, messageId }) => {
+  const [displayedText, setDisplayedText] = useState(animate ? "" : text);
+  const indexRef = useRef(0);
+  const onDoneRef = useRef(onDone);
+  const onProgressRef = useRef(onProgress);
+
+  // Update refs when callbacks change
+  useEffect(() => {
+    onDoneRef.current = onDone;
+    onProgressRef.current = onProgress;
+  }, [onDone, onProgress]);
+
+  useEffect(() => {
+    if (!animate) {
+      setDisplayedText(text);
+      if (messageId) {
+        const state = animationStates.get(messageId);
+        if (state) {
+          if (state.timer) clearTimeout(state.timer);
+          animationStates.delete(messageId);
+        }
+      }
+      return;
+    }
+
+    if (!messageId) {
+      setDisplayedText(text);
+      return;
+    }
+
+    const state = animationStates.get(messageId);
+    
+    // If we're already animating the same text, don't restart
+    if (state && state.isAnimating && state.currentText === text) {
+      return;
+    }
+
+    // If we're animating different text, clear the current animation first
+    if (state && state.isAnimating && state.currentText !== text) {
+      if (state.timer) {
+        clearTimeout(state.timer);
+      }
+    }
+
+    setDisplayedText("");
+    indexRef.current = 0;
+
+    const totalChars = text.length;
+    const targetDurationMs = Math.min(4000, Math.max(1200, totalChars * speedMsPerChar));
+    const stepMs = Math.max(8, Math.floor(targetDurationMs / Math.max(1, totalChars)));
+
+    const tick = () => {
+      const nextIndex = indexRef.current + 1;
+      setDisplayedText(text.slice(0, nextIndex));
+      indexRef.current = nextIndex;
+      if (onProgressRef.current) onProgressRef.current();
+      if (nextIndex < text.length) {
+        const timer = window.setTimeout(tick, stepMs);
+        const currentState = animationStates.get(messageId);
+        if (currentState) {
+          currentState.timer = timer;
+        }
+      } else {
+        const currentState = animationStates.get(messageId);
+        if (currentState) {
+          currentState.isAnimating = false;
+          currentState.timer = null;
+        }
+        if (onDoneRef.current) onDoneRef.current();
+      }
+    };
+
+    const timer = window.setTimeout(tick, stepMs);
+    animationStates.set(messageId, {
+      isAnimating: true,
+      currentText: text,
+      timer
+    });
+
+    return () => {
+      const currentState = animationStates.get(messageId);
+      if (currentState && currentState.timer) {
+        clearTimeout(currentState.timer);
+        currentState.isAnimating = false;
+        currentState.timer = null;
+      }
+    };
+  }, [text, animate, speedMsPerChar, messageId]);
+
+  return <p>{displayedText}</p>;
+};
 
 interface ChatbotProps {
   onLogout: () => void;
@@ -66,7 +160,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputMessage, setInputMessage] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [conversationHistory, setConversationHistory] = useState<unknown[]>([]);
+  const [conversationHistory, setConversationHistory] = useState<ChatTurn[]>([]);
   const [riskContext, setRiskContext] = useState<RiskContext>({});
   const [showRiskSummary, setShowRiskSummary] = useState(false);
   const [riskSummary, setRiskSummary] = useState("");
@@ -75,36 +169,16 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const [showRiskRegister, setShowRiskRegister] = useState(false);
   const [showRiskProfileTable, setShowRiskProfileTable] = useState(false);
   const [showMatrixPreviewModal, setShowMatrixPreviewModal] = useState(false);
-  const [matrixPreviewData, setMatrixPreviewData] = useState<{
-    matrix_size: string;
-    profiles: RiskProfile[];
-  } | null>(null);
+  const [matrixPreviewData, setMatrixPreviewData] = useState<MatrixPreviewData | null>(null);
   const [generatedRisks, setGeneratedRisks] = useState<Risk[]>([]);
+  const [isFinalizingRisks, setIsFinalizingRisks] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const [showControlTable, setShowControlTable] = useState(false);
-  const [generatedControls, setGeneratedControls] = useState<Control[]>([]);
+  const [animateMessageId, setAnimateMessageId] = useState<string | null>(null);
+
+  // Note: latestBotMessageId no longer used; animation is controlled by animateMessageId
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
-  // Typing animation for bot responses
-  const animateBotMessage = (fullText: string) => {
-    const id = (Date.now() + Math.random()).toString();
-    const newMsg: Message = { id, text: "", sender: "bot", timestamp: new Date() };
-    setMessages((prev) => [...prev, newMsg]);
-
-    let i = 0;
-    const total = fullText.length;
-    // Adaptive step based on message size for reasonable speed
-    const step = Math.max(1, Math.round(total / 200));
-    const interval = setInterval(() => {
-      i = Math.min(i + step, total);
-      const slice = fullText.slice(0, i);
-      setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, text: slice } : m)));
-      if (i >= total) {
-        clearInterval(interval);
-      }
-    }, 15);
   };
 
   useEffect(() => {
@@ -120,7 +194,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
     // Use static greeting message
     const greetingMessage: Message = {
       id: Date.now().toString(),
-      text: "Welcome to NexiAgent! I'm here to help your organization with comprehensive risk assessment, compliance management, and risk mitigation strategies.\n\nI can assist you with identifying operational, financial, strategic, and compliance risks, as well as provide guidance on industry regulations and best practices.\n\nWhat specific risk management challenges or compliance requirements would you like to discuss today?",
+      text: "Welcome to the Risk Management Agent! I'm here to help your organization with comprehensive risk assessment, compliance management, and risk mitigation strategies.\n\nI can assist you with identifying operational, financial, strategic, and compliance risks, as well as provide guidance on industry regulations and best practices.\n\nWhat specific risk management challenges or compliance requirements would you like to discuss today?",
       sender: "bot",
       timestamp: new Date(),
     };
@@ -146,7 +220,14 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       const matrixSize = extractMatrixSize(inputMessage);
       const response = await applyMatrixRecommendation(matrixSize);
 
-      animateBotMessage(response);
+      const botMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        text: response,
+        sender: "bot",
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, botMessage]);
+      setAnimateMessageId(botMessage.id);
       setIsLoading(false);
       return;
     }
@@ -156,7 +237,14 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       const matrixSize = extractMatrixSize(inputMessage);
       const response = await createMatrixRecommendation(matrixSize);
 
-      animateBotMessage(response);
+      const botMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        text: response,
+        sender: "bot",
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, botMessage]);
+      setAnimateMessageId(botMessage.id);
       setIsLoading(false);
       return;
     }
@@ -171,6 +259,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, botMessage]);
+      setAnimateMessageId(botMessage.id);
       setIsLoading(false);
       return;
     }
@@ -185,6 +274,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, botMessage]);
+      setAnimateMessageId(botMessage.id);
       setIsLoading(false);
       return;
     }
@@ -197,7 +287,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
         throw new Error("No authentication token found");
       }
 
-      const response = await fetch("http://localhost:8000/chat", {
+      const response = await fetch("https://api.agentic.complynexus.com/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -213,20 +303,19 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       if (response.ok) {
         const data = await response.json();
 
-        // First check if controls were generated in risk_context
-        let formattedResponse = data.response;
-        if (data.risk_context && data.risk_context.generated_controls) {
-          const generatedControls = data.risk_context.generated_controls;
-          setGeneratedControls(generatedControls);
-          setShowControlTable(true);
-          formattedResponse = formatControlsForChat(generatedControls);
-        } else {
-          // Check if this response contains generated risks and format it
-          formattedResponse = await checkForRiskGeneration(data.response);
-        }
+        // Check if this response contains generated risks and format it
+        const formattedResponse = await checkForRiskGeneration(data.response);
 
         // Create bot message with formatted response
-        animateBotMessage(formattedResponse);
+        const botMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          text: formattedResponse,
+          sender: "bot",
+          timestamp: new Date(),
+        };
+
+        setMessages((prev) => [...prev, botMessage]);
+        setAnimateMessageId(botMessage.id);
         setConversationHistory(data.conversation_history);
         setRiskContext(data.risk_context);
       } else {
@@ -248,6 +337,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
           timestamp: new Date(),
         };
         setMessages((prev) => [...prev, errorMessage]);
+        setAnimateMessageId(errorMessage.id);
       }
     } catch (error) {
       console.error("Error sending message:", error);
@@ -258,96 +348,9 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, errorMessage]);
+      setAnimateMessageId(errorMessage.id);
     } finally {
       setIsLoading(false);
-    }
-  };
-
-  const tryParseControls = (payload: unknown): Control[] => {
-    try {
-      if (!payload) return [];
-      if (Array.isArray(payload)) return payload as Control[];
-      const text = typeof payload === "string" ? payload : JSON.stringify(payload);
-      // naive JSON array detection
-      const match = text.match(/\[\s*{[\s\S]*}\s*\]/);
-      if (!match) return [];
-      const arr = JSON.parse(match[0]);
-      return (arr || []).map((c: Record<string, unknown>, i: number) => {
-        // Ensure all required fields have default values according to new Control model
-        const control: Control = {
-          id: c.id as string,
-          control_id: (c.control_id as string) || `C-${i + 1}`,
-          control_title: (c.control_title as string) || (c.title as string) || `Control ${i + 1}`,
-          control_description: (c.control_description as string) || (c.description as string) || "",
-          objective: (c.objective as string) || "",
-          annexA_map: Array.isArray(c.annexA_map) ? (c.annexA_map as AnnexAMapping[]) : [],
-          linked_risk_ids: Array.isArray(c.linked_risk_ids) ? (c.linked_risk_ids as string[]) : [],
-          owner_role: (c.owner_role as string) || (c.owner as string) || "",
-          process_steps: Array.isArray(c.process_steps) ? (c.process_steps as string[]) : [],
-          evidence_samples: Array.isArray(c.evidence_samples) ? (c.evidence_samples as string[]) : [],
-          metrics: Array.isArray(c.metrics) ? (c.metrics as string[]) : [],
-          frequency: (c.frequency as string) || "",
-          policy_ref: (c.policy_ref as string) || "",
-          status: (c.status as string) || "Planned",
-          rationale: (c.rationale as string) || "",
-          assumptions: (c.assumptions as string) || "",
-          isSelected: false,
-        };
-        return control;
-      });
-    } catch {
-      return [];
-    }
-  };
-
-  const finalizeControls = async (selected: Control[]) => {
-    try {
-      const token = localStorage.getItem("token");
-      const res = await fetch("http://localhost:8000/controls/save", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: token ? `Bearer ${token}` : "",
-        },
-        body: JSON.stringify({ controls: selected }),
-      });
-
-      if (res.ok) {
-        await res.json();
-        // Add success message to chat
-        const successMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          text: `✅ **Controls Saved Successfully!**\n\n${selected.length} control(s) have been saved to your control database.\n\nYou can now implement these controls as part of your risk mitigation strategy.`,
-          sender: "bot",
-          timestamp: new Date(),
-        };
-        setMessages((prev) => [...prev, successMessage]);
-        setShowControlTable(false);
-        setGeneratedControls([]);
-      } else {
-        const errorData = await res.json().catch(() => ({}));
-        console.error("Failed to save controls:", errorData);
-
-        // Add error message to chat
-        const errorMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          text: `❌ **Error Saving Controls**\n\nFailed to save the selected controls. Please try again.`,
-          sender: "bot",
-          timestamp: new Date(),
-        };
-        setMessages((prev) => [...prev, errorMessage]);
-      }
-    } catch (error) {
-      console.error("Error saving controls:", error);
-
-      // Add error message to chat
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        text: `❌ **Error Saving Controls**\n\nAn error occurred while saving the controls. Please try again.`,
-        sender: "bot",
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errorMessage]);
     }
   };
 
@@ -355,7 +358,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
     setIsGeneratingSummary(true);
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("http://localhost:8000/risk-summary/finalized", {
+      const response = await fetch("https://api.agentic.complynexus.com/risk-summary/finalized", {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
@@ -392,7 +395,13 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   };
 
   const getQuickActions = () => {
-    return ["Generate risks for our organization", "Open risk register", "Generate finalized risks summary", "Update my risk preferences", "What are the key operational risks for our organization?", "How can we improve our compliance with GDPR?", "What cybersecurity risks should we be aware of?", "Help me create a risk assessment framework"];
+    return [
+      "Generate risks for our organization",
+      "Open risk register",
+      "Generate finalized risks summary",
+      "Update my risk preferences",
+      "Help me create a risk assessment framework",
+    ];
   };
 
   const handleQuickAction = (action: string) => {
@@ -416,7 +425,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       const riskIndex = generatedRisks.findIndex((risk) => risk.id === riskId);
 
       if (riskIndex !== -1) {
-        const response = await fetch(`http://localhost:8000/risks/${riskIndex}/selection`, {
+        const response = await fetch(`https://api.agentic.complynexus.com/risks/${riskIndex}/selection`, {
           method: "PUT",
           headers: {
             "Content-Type": "application/json",
@@ -440,6 +449,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
 
   const handleFinalizeRisks = async (selectedRisks: Risk[]) => {
     try {
+      setIsFinalizingRisks(true);
       const token = localStorage.getItem("token");
 
       // Use the selectedRisks directly since they already contain the edited data
@@ -447,7 +457,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
 
       console.log("Finalizing risks:", risksToFinalize); // Debug log
 
-      const response = await fetch("http://localhost:8000/risks/finalize", {
+      const response = await fetch("https://api.agentic.complynexus.com/risks/finalize", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -512,6 +522,8 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       };
 
       setMessages((prev) => [...prev, errorMessage]);
+    } finally {
+      setIsFinalizingRisks(false);
     }
   };
 
@@ -557,7 +569,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
 
       console.log("Sending matrix recommendation request to agent:", matrixMessage);
 
-      const response = await fetch("http://localhost:8000/chat", {
+      const response = await fetch("https://api.agentic.complynexus.com/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -582,17 +594,29 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
           console.log("Matrix data generated by agent:", data.risk_context.generated_matrix);
 
           // Transform agent's matrix data to match the expected format for the modal
-          const matrixData = data.risk_context.generated_matrix as { risk_categories?: Array<Record<string, unknown>> };
-          const formattedMatrixData = {
+          const matrixData = data.risk_context.generated_matrix;
+          const toRiskLevels = (scale: unknown[]): RiskLevel[] => {
+            return (scale || []).map((item: unknown, idx: number) => {
+              if (typeof item === "object" && item !== null && "level" in (item as Record<string, unknown>) && "title" in (item as Record<string, unknown>)) {
+                const obj = item as { level?: unknown; title?: unknown; description?: unknown };
+                return { level: Number(obj.level) || idx + 1, title: String(obj.title || ""), description: String(obj.description || "") };
+              }
+              const title = String(item as unknown as string);
+              return { level: idx + 1, title, description: "" };
+            });
+          };
+
+          const formattedMatrixData: MatrixPreviewData = {
             matrix_size: matrixSize,
             profiles:
-              matrixData.risk_categories?.map((category: Record<string, unknown>) => ({
-                riskType: String(category.riskType || ""),
-                definition: String(category.definition || ""),
-                likelihoodScale: (Array.isArray(category.likelihoodScale) ? category.likelihoodScale : []) as RiskLevel[],
-                impactScale: (Array.isArray(category.impactScale) ? category.impactScale : []) as RiskLevel[],
+              (matrixData.risk_categories as Array<{ riskType: string; definition: string; likelihoodScale?: unknown[]; impactScale?: unknown[] }>)?.map((category) => ({
+                riskType: category.riskType,
+                definition: category.definition,
+                likelihoodScale: toRiskLevels(category.likelihoodScale || []),
+                impactScale: toRiskLevels(category.impactScale || []),
                 matrixSize: matrixSize,
               })) || [],
+            totalProfiles: matrixData.risk_categories?.length || 0,
           };
 
           setMatrixPreviewData(formattedMatrixData);
@@ -601,7 +625,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
           // Fallback: Fetch matrix data from API if agent didn't generate it
           console.log("No matrix data from agent, fetching from API");
           try {
-            const matrixDataResponse = await fetch("http://localhost:8000/user/risk-profiles/matrix-recommendation", {
+            const matrixDataResponse = await fetch("https://api.agentic.complynexus.com/user/risk-profiles/matrix-recommendation", {
               method: "POST",
               headers: {
                 Authorization: `Bearer ${token}`,
@@ -648,7 +672,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const applyMatrixRecommendation = async (matrixSize: string) => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("http://localhost:8000/user/risk-profiles/apply-matrix-recommendation", {
+      const response = await fetch("https://api.agentic.complynexus.com/user/risk-profiles/apply-matrix-recommendation", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -691,7 +715,7 @@ You can continue using the risk profile dashboard to further customize the scale
       console.log("Applying matrix configuration:", { matrixSize, updatedProfiles });
 
       // Use the new endpoint that accepts custom profiles
-      const response = await fetch("http://localhost:8000/user/risk-profiles/apply-matrix-configuration", {
+      const response = await fetch("https://api.agentic.complynexus.com/user/risk-profiles/apply-matrix-configuration", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -755,84 +779,7 @@ Please try again or contact support if the issue persists.`,
     return riskRegisterIndicators.some((indicator) => message.toLowerCase().includes(indicator.toLowerCase()));
   };
 
-  const checkForControlGeneration = (response: string) => {
-    // Check if the response contains control-related keywords and structure
-    const controlIndicators = ["controls", "control measures", "security controls", "recommended controls", "control implementation", "control framework", "ISO 27001", "NIST", "annex"];
-
-    const hasControlKeywords = controlIndicators.some((indicator) => response.toLowerCase().includes(indicator.toLowerCase()));
-
-    // Check for JSON-like structure with control properties
-    const hasControlStructure = response.includes('"control_title"') || response.includes('"control_id"') || response.includes('"status"');
-
-    if (hasControlKeywords || hasControlStructure) {
-      const controls = tryParseControls(response);
-      if (controls.length > 0) {
-        setGeneratedControls(controls);
-        setShowControlTable(true);
-        return formatControlsForChat(controls);
-      }
-    }
-    return response;
-  };
-
-  const formatControlsForChat = (controls: Control[]): string => {
-    let formattedResponse = "🔐 Generated ISO 27001 Security Controls\n\n";
-
-    controls.forEach((control, index) => {
-      const title = control.control_title || `Control ${index + 1}`;
-      const description = control.control_description || "";
-
-      formattedResponse += `${index + 1}. **${title}**\n`;
-
-      if (control.control_id) {
-        formattedResponse += `📋 ID: ${control.control_id}\n`;
-      }
-
-      if (control.objective) {
-        formattedResponse += `🎯 Objective: ${control.objective}\n`;
-      }
-
-      if (description) {
-        formattedResponse += `� Description: ${description}\n`;
-      }
-
-      if (control.annexA_map && control.annexA_map.length > 0) {
-        formattedResponse += `📚 ISO Mappings: ${control.annexA_map.map((a) => `${a.id} (${a.title})`).join(", ")}\n`;
-      }
-
-      if (control.owner_role) {
-        formattedResponse += `👤 Owner Role: ${control.owner_role}\n`;
-      }
-
-      formattedResponse += `📊 Status: ${control.status}\n`;
-
-      if (control.process_steps && control.process_steps.length > 0) {
-        formattedResponse += `📋 Key Process Steps: ${control.process_steps.slice(0, 2).join(" → ")}\n`;
-      }
-
-      if (control.metrics && control.metrics.length > 0) {
-        formattedResponse += `📈 Success Metrics: ${control.metrics.slice(0, 2).join(", ")}\n`;
-      }
-
-      formattedResponse += `\n---\n\n`;
-    });
-
-    formattedResponse += "💡 **Next Steps:** Review these comprehensive controls in the detailed table where you can:\n";
-    formattedResponse += "• View complete implementation process steps\n";
-    formattedResponse += "• See evidence samples and audit requirements\n";
-    formattedResponse += "• Review ISO 27001 Annex A mappings\n";
-    formattedResponse += "• Select controls for implementation in your organization\n";
-
-    return formattedResponse;
-  };
-
   const checkForRiskGeneration = async (response: string) => {
-    // First check for controls
-    const controlResponse = checkForControlGeneration(response);
-    if (controlResponse !== response) {
-      return controlResponse; // Controls were found and formatted
-    }
-
     // Check if the response contains generated risks (JSON format or text format)
     const hasJsonRisks = response.includes('"risks"') && response.includes('"description"');
 
@@ -863,7 +810,7 @@ Please try again or contact support if the issue persists.`,
   const saveRisksToDatabase = async (risks: Risk[]) => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("http://localhost:8000/risks/save", {
+      const response = await fetch("https://api.agentic.complynexus.com/risks/save", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -920,12 +867,13 @@ Please try again or contact support if the issue persists.`,
     <div className="chatbot-container">
       <div className="chatbot-header">
         <div className="header-content">
-          <h2>🛡️ NexiAgent</h2>
-          <p className="header-subtitle">AI-powered risk & compliance assistant</p>
+          <div className="brand">
+            <img src={logo} alt="ComplyNexus" className="brand-logo-img" />
+          </div>
         </div>
         <div className="header-actions">
           <button onClick={generateRiskSummary} disabled={isGeneratingSummary} className="summary-btn" title="Generate comprehensive risk assessment summary based on your finalized risks">
-            {isGeneratingSummary ? "Generating..." : "📊 Finalized Risks Summary"}
+            {isGeneratingSummary ? "Generating..." : "Finalised Risk Summary"}
           </button>
           <button onClick={onLogout} className="logout-btn">
             Logout
@@ -949,13 +897,11 @@ Please try again or contact support if the issue persists.`,
         </div>
       )}
 
-      {showRiskTable && <RiskTable risks={generatedRisks} onRiskSelectionChange={handleRiskSelectionChange} onFinalize={handleFinalizeRisks} onClose={() => setShowRiskTable(false)} />}
+      {showRiskTable && <RiskTable risks={generatedRisks} onRiskSelectionChange={handleRiskSelectionChange} onFinalize={handleFinalizeRisks} onClose={() => setShowRiskTable(false)} isFinalizing={isFinalizingRisks} />}
 
       {showRiskRegister && <RiskRegister onClose={() => setShowRiskRegister(false)} />}
 
       {showRiskProfileTable && <RiskProfileTable onClose={() => setShowRiskProfileTable(false)} />}
-
-      {showControlTable && <ControlTable controls={generatedControls} onFinalize={finalizeControls} onClose={() => setShowControlTable(false)} title="Proposed Controls" />}
 
       {showMatrixPreviewModal && (
         <MatrixPreviewModal
@@ -970,7 +916,7 @@ Please try again or contact support if the issue persists.`,
       )}
 
       <div className="quick-actions">
-        <h4>💡 Quick Actions</h4>
+        <h4>Quick Actions</h4>
         <div className="action-buttons">
           {getQuickActions().map((action, index) => (
             <button key={index} onClick={() => handleQuickAction(action)} className="quick-action-btn" disabled={isLoading}>
@@ -984,7 +930,24 @@ Please try again or contact support if the issue persists.`,
         {messages.map((message) => (
           <div key={message.id} className={`message ${message.sender === "user" ? "user-message" : "bot-message"}`}>
             <div className="message-content">
-              <p>{message.text}</p>
+              {message.sender === "bot" ? (
+                <>
+                  <div className="bot-header">
+                    <img src={badge} alt="Risk Agent" className="bot-badge-img" style={{width: '500px', height: '22px', display: 'block'}} />
+                  </div>
+                  <AnimatedText 
+                    text={message.text} 
+                    animate={animateMessageId === message.id} 
+                    onProgress={scrollToBottom} 
+                    onDone={() => { 
+                      if (animateMessageId === message.id) setAnimateMessageId(null); 
+                    }}
+                    messageId={message.id}
+                  />
+                </>
+              ) : (
+                <p>{message.text}</p>
+              )}
               <span className="message-time">{formatTime(message.timestamp)}</span>
             </div>
           </div>
@@ -992,13 +955,9 @@ Please try again or contact support if the issue persists.`,
         {isLoading && (
           <div className="message bot-message">
             <div className="message-content">
-              <p>
-                <strong>NexiAgent is thinking…</strong>
-              </p>
-              <div className="typing-indicator" aria-label="NexiAgent is typing">
-                <span></span>
-                <span></span>
-                <span></span>
+              <div className="loader-row">
+                <img src={loaderAnimation} alt="Loading" className="loader-animation" />
+                <span className="loader-text">Nexi is thinking...</span>
               </div>
             </div>
           </div>
@@ -1008,12 +967,10 @@ Please try again or contact support if the issue persists.`,
 
       <div className="chat-input-container">
         <div className="input-wrapper">
+          <img src={nexiGif} alt="Nexi" className="input-gif" />
           <textarea value={inputMessage} onChange={(e) => setInputMessage(e.target.value)} onKeyPress={handleKeyPress} placeholder="Ask about risk assessment, compliance, or risk management strategies..." disabled={isLoading} rows={1} className="chat-input" />
           <button onClick={sendMessage} disabled={!inputMessage.trim() || isLoading} className="send-btn">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M22 2L11 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-              <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
+            <img src={arrowUp} alt="Send" className="send-icon" />
           </button>
         </div>
       </div>
