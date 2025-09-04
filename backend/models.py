@@ -99,27 +99,6 @@ class Control(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
-# Legacy Control model for backward compatibility (deprecated)
-class LegacyControl(BaseModel):
-    id: Optional[str] = None
-    control_id: Optional[str] = None
-    title: str
-    description: Optional[str] = None
-    domain_category: Optional[str] = None
-    annex_reference: Optional[str] = None
-    control_statement: Optional[str] = None
-    implementation_guidance: Optional[str] = None
-    risk_id: Optional[str] = None
-    user_id: Optional[str] = None
-    priority: Optional[str] = "Medium"
-    status: Optional[str] = "Planned"
-    owner: Optional[str] = None
-    frequency: Optional[str] = None
-    evidence: Optional[str] = None
-    category: Optional[str] = None
-    isSelected: Optional[bool] = False
-    created_at: Optional[datetime] = None
-
 class ControlSelection(BaseModel):
     session_id: str
     selected_control_ids: List[str]

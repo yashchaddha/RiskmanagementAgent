@@ -485,7 +485,7 @@ class SaveControlsRequest(BaseModel):
 
 @app.post("/controls/save")
 async def save_controls(request: SaveControlsRequest, current_user=Depends(get_current_user)):
-    """Save selected controls directly to the database - supports both new and legacy formats"""
+    """Save selected controls directly to the database using new Control model format"""
     try:
         user_id = current_user.get("username", "")
         
@@ -498,29 +498,9 @@ async def save_controls(request: SaveControlsRequest, current_user=Depends(get_c
         # Prepare controls with user context
         controls_to_save = []
         for control in request.controls:
-            # Check if this is the new comprehensive format or legacy format
-            if hasattr(control, 'control_title') and control.control_title:
-                # New comprehensive format
-                control_dict = control.model_dump()
-                control_dict["user_id"] = user_id
-            else:
-                # Legacy format - convert to dictionary 
-                control_dict = {
-                    "control_id": control.id,
-                    "title": control.title,
-                    "description": control.description or "",
-                    "domain_category": getattr(control, 'category', '') or getattr(control, 'domain_category', ''),
-                    "annex_reference": getattr(control, 'annex_reference', '') or "",
-                    "control_statement": control.description or "",
-                    "implementation_guidance": getattr(control, 'implementation_guidance', '') or "",
-                    "risk_id": getattr(control, 'risk_id', '') or "",
-                    "user_id": user_id,
-                    "priority": getattr(control, 'priority', 'Medium'),
-                    "status": getattr(control, 'status', 'Planned'),
-                    "owner": getattr(control, 'owner', ''),
-                    "frequency": getattr(control, 'frequency', ''),
-                    "evidence": getattr(control, 'evidence', '')
-                }
+            # Use new comprehensive Control model format
+            control_dict = control.model_dump()
+            control_dict["user_id"] = user_id
             controls_to_save.append(control_dict)
         
         # Save controls to database

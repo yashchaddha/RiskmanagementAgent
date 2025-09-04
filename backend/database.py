@@ -1283,9 +1283,15 @@ class ControlsDatabaseService:
         all_risks = ControlsDatabaseService._flatten_risks_docs(fin_docs or gen_docs, user_id)
 
         if exclude_with_controls:
-            risk_ids_with_controls = set(
-                str(rid) for rid in controls_collection.distinct("risk_id", {"user_id": user_id})
-            )
+            # Get all risk IDs that are referenced in any control's linked_risk_ids
+            controls_with_risks = list(controls_collection.find(
+                {"user_id": user_id, "linked_risk_ids": {"$ne": []}}, 
+                {"linked_risk_ids": 1}
+            ))
+            risk_ids_with_controls = set()
+            for control in controls_with_risks:
+                risk_ids_with_controls.update(control.get("linked_risk_ids", []))
+            
             all_risks = [r for r in all_risks if r.get("id") not in risk_ids_with_controls]
 
         return all_risks
@@ -1302,17 +1308,29 @@ class ControlsDatabaseService:
 
     @staticmethod
     def get_controls_by_risk(risk_id: str, user_id: str) -> list:
-        return _to_str_id(list(controls_collection.find({"risk_id": risk_id, "user_id": user_id})))
+        """Get controls by linked risk ID - updated to use new Control model"""
+        return _to_str_id(list(controls_collection.find({
+            "user_id": user_id,
+            "linked_risk_ids": {"$in": [risk_id]}
+        })))
 
     @staticmethod
     def get_controls_by_annex(annex: str, user_id: str) -> list:
-        return _to_str_id(list(controls_collection.find({"annex_reference": {"$regex": f"^{annex}"}, "user_id": user_id})))
+        """Get controls by Annex A mapping - updated to use new Control model"""
+        return _to_str_id(list(controls_collection.find({
+            "user_id": user_id,
+            "annexA_map": {"$elemMatch": {"id": {"$regex": f"^{annex}", "$options": "i"}}}
+        })))
 
     @staticmethod
     def get_controls_by_category(category: str, user_id: str) -> list:
+        """Get controls that are linked to risks of a specific category"""
         risks = ControlsDatabaseService.get_user_risks(user_id)
         risk_ids = [r["id"] for r in risks if r.get("category") == category]
-        return _to_str_id(list(controls_collection.find({"user_id": user_id, "risk_id": {"$in": risk_ids}})))
+        return _to_str_id(list(controls_collection.find({
+            "user_id": user_id, 
+            "linked_risk_ids": {"$in": risk_ids}
+        })))
 
     @staticmethod
     def save_controls(controls: list) -> list[str]:

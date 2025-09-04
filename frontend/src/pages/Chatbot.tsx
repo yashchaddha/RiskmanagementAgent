@@ -272,37 +272,29 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       const match = text.match(/\[\s*{[\s\S]*}\s*\]/);
       if (!match) return [];
       const arr = JSON.parse(match[0]);
-      return (arr || []).map((c: Record<string, unknown>, i: number) => ({
-        // Handle both new comprehensive format and legacy format
-        id: c.id || c.control_id || c.uuid || String(i + 1),
-
-        // New comprehensive format fields
-        control_id: c.control_id as string,
-        control_title: c.control_title as string,
-        control_description: c.control_description as string,
-        objective: c.objective as string,
-        annexA_map: Array.isArray(c.annexA_map) ? (c.annexA_map as AnnexAMapping[]) : undefined,
-        linked_risk_ids: Array.isArray(c.linked_risk_ids) ? (c.linked_risk_ids as string[]) : undefined,
-        owner_role: c.owner_role as string,
-        process_steps: Array.isArray(c.process_steps) ? (c.process_steps as string[]) : undefined,
-        evidence_samples: Array.isArray(c.evidence_samples) ? (c.evidence_samples as string[]) : undefined,
-        metrics: Array.isArray(c.metrics) ? (c.metrics as string[]) : undefined,
-        policy_ref: c.policy_ref as string,
-        rationale: c.rationale as string,
-        assumptions: c.assumptions as string,
-
-        // Legacy format fields (fallback)
-        risk_id: c.risk_id as string,
-        title: c.title || c.control_title || c.name || c.description || `Control ${i + 1}`,
-        description: c.description || c.control_description || "",
-        annex_reference: c.annex_reference || c.annex || "",
-        priority: c.priority || "Medium",
-        status: c.status || "Planned",
-        owner: c.owner || c.owner_role || "",
-        frequency: c.frequency || "",
-        evidence: c.evidence || "",
-        isSelected: false,
-      }));
+      return (arr || []).map((c: Record<string, unknown>, i: number) => {
+        // Ensure all required fields have default values according to new Control model
+        const control: Control = {
+          id: c.id as string,
+          control_id: (c.control_id as string) || `C-${i + 1}`,
+          control_title: (c.control_title as string) || (c.title as string) || `Control ${i + 1}`,
+          control_description: (c.control_description as string) || (c.description as string) || "",
+          objective: (c.objective as string) || "",
+          annexA_map: Array.isArray(c.annexA_map) ? (c.annexA_map as AnnexAMapping[]) : [],
+          linked_risk_ids: Array.isArray(c.linked_risk_ids) ? (c.linked_risk_ids as string[]) : [],
+          owner_role: (c.owner_role as string) || (c.owner as string) || "",
+          process_steps: Array.isArray(c.process_steps) ? (c.process_steps as string[]) : [],
+          evidence_samples: Array.isArray(c.evidence_samples) ? (c.evidence_samples as string[]) : [],
+          metrics: Array.isArray(c.metrics) ? (c.metrics as string[]) : [],
+          frequency: (c.frequency as string) || "",
+          policy_ref: (c.policy_ref as string) || "",
+          status: (c.status as string) || "Planned",
+          rationale: (c.rationale as string) || "",
+          assumptions: (c.assumptions as string) || "",
+          isSelected: false,
+        };
+        return control;
+      });
     } catch {
       return [];
     }
@@ -770,7 +762,7 @@ Please try again or contact support if the issue persists.`,
     const hasControlKeywords = controlIndicators.some((indicator) => response.toLowerCase().includes(indicator.toLowerCase()));
 
     // Check for JSON-like structure with control properties
-    const hasControlStructure = response.includes('"title"') || response.includes('"annex_reference"') || response.includes('"priority"') || response.includes('"status"');
+    const hasControlStructure = response.includes('"control_title"') || response.includes('"control_id"') || response.includes('"status"');
 
     if (hasControlKeywords || hasControlStructure) {
       const controls = tryParseControls(response);
@@ -787,8 +779,8 @@ Please try again or contact support if the issue persists.`,
     let formattedResponse = "🔐 Generated ISO 27001 Security Controls\n\n";
 
     controls.forEach((control, index) => {
-      const title = control.control_title || control.title || `Control ${index + 1}`;
-      const description = control.control_description || control.description || "";
+      const title = control.control_title || `Control ${index + 1}`;
+      const description = control.control_description || "";
 
       formattedResponse += `${index + 1}. **${title}**\n`;
 
@@ -806,16 +798,13 @@ Please try again or contact support if the issue persists.`,
 
       if (control.annexA_map && control.annexA_map.length > 0) {
         formattedResponse += `📚 ISO Mappings: ${control.annexA_map.map((a) => `${a.id} (${a.title})`).join(", ")}\n`;
-      } else if (control.annex_reference) {
-        formattedResponse += `� ISO Reference: ${control.annex_reference}\n`;
       }
 
       if (control.owner_role) {
         formattedResponse += `👤 Owner Role: ${control.owner_role}\n`;
       }
 
-      formattedResponse += `⚡ Priority: ${control.priority || "Medium"}\n`;
-      formattedResponse += `📊 Status: ${control.status || "Planned"}\n`;
+      formattedResponse += `📊 Status: ${control.status}\n`;
 
       if (control.process_steps && control.process_steps.length > 0) {
         formattedResponse += `📋 Key Process Steps: ${control.process_steps.slice(0, 2).join(" → ")}\n`;
@@ -1003,7 +992,9 @@ Please try again or contact support if the issue persists.`,
         {isLoading && (
           <div className="message bot-message">
             <div className="message-content">
-              <p><strong>NexiAgent is thinking…</strong></p>
+              <p>
+                <strong>NexiAgent is thinking…</strong>
+              </p>
               <div className="typing-indicator" aria-label="NexiAgent is typing">
                 <span></span>
                 <span></span>

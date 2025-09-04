@@ -7,37 +7,29 @@ export interface AnnexAMapping {
   title: string; // e.g., "Information security during disruption"
 }
 
-// Comprehensive control interface supporting new enhanced format
+// Control interface matching the backend Control model exactly
 export interface Control {
-  id: string;
-  // New comprehensive format fields
-  control_id?: string; // e.g., "C-001"
-  control_title?: string; // Enhanced title field
-  control_description?: string; // Detailed description
-  objective?: string; // Business objective
-  annexA_map?: AnnexAMapping[]; // Array of ISO mappings
-  linked_risk_ids?: string[]; // Array of related risk IDs
-  owner_role?: string; // Responsible role
-  process_steps?: string[]; // Implementation steps
-  evidence_samples?: string[]; // Evidence examples
-  metrics?: string[]; // KPIs and metrics
-  policy_ref?: string; // Policy reference
-  rationale?: string; // Business justification
-  assumptions?: string; // Any assumptions
+  id?: string; // MongoDB _id
+  control_id: string; // e.g., "C-001"
+  control_title: string; // e.g., "ICT Readiness & BCP for Regional Failover"
+  control_description: string; // What this control addresses
+  objective: string; // Business objective of the control
+  annexA_map: AnnexAMapping[]; // List of mapped ISO 27001 Annex A controls
+  linked_risk_ids: string[]; // Risk IDs this control addresses
+  owner_role: string; // e.g., "SRE Manager"
+  process_steps: string[]; // Step-by-step implementation process
+  evidence_samples: string[]; // Examples of evidence for this control
+  metrics: string[]; // Measurable outcomes/KPIs
+  frequency: string; // How often this control is executed/reviewed
+  policy_ref: string; // Reference to related policy
+  status: string; // e.g., "Implemented", "Planned", "In Progress"
+  rationale: string; // Why this control is necessary
+  assumptions: string; // Any assumptions made
+  user_id?: string; // For multi-tenancy
+  created_at?: string; // Optional datetime
+  updated_at?: string; // Optional datetime
 
-  // Legacy format fields (for backward compatibility)
-  risk_id?: string;
-  title?: string;
-  description?: string;
-  annex_reference?: string;
-  category?: string;
-  priority?: string; // "Low" | "Medium" | "High" | "Critical"
-  status?: string; // "Planned" | "In Progress" | "Implemented"
-  owner?: string;
-  frequency?: string; // e.g., "Monthly", "Quarterly"
-  evidence?: string; // link or note
-
-  // Common fields
+  // Frontend-only fields
   isSelected?: boolean;
 }
 
@@ -58,17 +50,25 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
 
   useEffect(() => {
     const withSelection = (controls || []).map((c) => {
-      // Normalize control format - support both new comprehensive and legacy formats
+      // Ensure all required fields have default values
       const normalizedControl: Control = {
         ...c,
-        // Use new format if available, fallback to legacy format
-        title: c.control_title || c.title || "(No title provided)",
-        description: c.control_description || c.description || "",
-        owner: c.owner_role || c.owner || "",
-        annex_reference: c.annexA_map?.map((a) => a.id).join(", ") || c.annex_reference || "",
-        isSelected: !!c.isSelected,
-        priority: c.priority || "Medium",
+        control_id: c.control_id || c.id || `C-${Date.now()}`,
+        control_title: c.control_title || "(No title provided)",
+        control_description: c.control_description || "",
+        objective: c.objective || "",
+        annexA_map: c.annexA_map || [],
+        linked_risk_ids: c.linked_risk_ids || [],
+        owner_role: c.owner_role || "",
+        process_steps: c.process_steps || [],
+        evidence_samples: c.evidence_samples || [],
+        metrics: c.metrics || [],
+        frequency: c.frequency || "",
+        policy_ref: c.policy_ref || "",
         status: c.status || "Planned",
+        rationale: c.rationale || "",
+        assumptions: c.assumptions || "",
+        isSelected: !!c.isSelected,
       };
       return normalizedControl;
     });
@@ -99,7 +99,7 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
     setIsSaving(true);
     try {
       const ret = (onFinalize as any)(selection);
-      if (ret && typeof ret.then === 'function') {
+      if (ret && typeof ret.then === "function") {
         await ret;
       }
     } finally {
@@ -186,12 +186,12 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
               {filteredRows.map((control) => (
                 <tr key={control.id} className={control.isSelected ? "selected" : ""}>
                   <td className="control-checkbox-cell">
-                    <input type="checkbox" checked={!!control.isSelected} onChange={(e) => updateField(control.id, "isSelected", e.target.checked)} />
+                    <input type="checkbox" checked={!!control.isSelected} onChange={(e) => updateField(control.id || control.control_id, "isSelected", e.target.checked)} />
                   </td>
 
                   <td className="control-title-cell">
                     <div className="control-title-main">
-                      {control.title || "(No title provided)"}
+                      {control.control_title || "(No title provided)"}
                       {(control.control_id || control.id) && <span className="control-id-badge">{control.control_id || control.id}</span>}
                       {(control.process_steps || control.evidence_samples || control.metrics) && (
                         <button className="control-details-btn" onClick={() => showControlDetails(control)} title="View comprehensive details">
@@ -199,7 +199,7 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
                         </button>
                       )}
                     </div>
-                    {control.description && <div className="control-title-desc">{control.description}</div>}
+                    {control.control_description && <div className="control-title-desc">{control.control_description}</div>}
                     {control.rationale && (
                       <div className="control-rationale">
                         <strong>Rationale:</strong> {control.rationale}
@@ -227,12 +227,16 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
                         ))}
                       </div>
                     ) : (
-                      <input className="control-annex-input" value={control.annex_reference || ""} onChange={(e) => updateField(control.id, "annex_reference", e.target.value)} placeholder="A.5.1" />
+                      <div className="annex-input-container">
+                        <span>Manual Annex Reference:</span>
+                        <input className="control-annex-input" value="" onChange={() => {}} placeholder="A.5.1 (deprecated)" disabled />
+                        <small>Use the structured Annex A mappings above instead</small>
+                      </div>
                     )}
                   </td>
 
                   <td className="control-status-cell">
-                    <select className="control-status-select" value={control.status || "Planned"} onChange={(e) => updateField(control.id, "status", e.target.value)}>
+                    <select className="control-status-select" value={control.status} onChange={(e) => updateField(control.id || control.control_id, "status", e.target.value)}>
                       <option value="Planned">Planned</option>
                       <option value="In Progress">In Progress</option>
                       <option value="Implemented">Implemented</option>
@@ -240,12 +244,11 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
                   </td>
 
                   <td className="control-owner-cell">
-                    <input className="control-owner-input" value={control.owner || ""} onChange={(e) => updateField(control.id, "owner", e.target.value)} placeholder={control.owner_role || "John Doe"} />
-                    {control.owner_role && control.owner_role !== control.owner && <small className="suggested-owner">Suggested: {control.owner_role}</small>}
+                    <input className="control-owner-input" value={control.owner_role} onChange={(e) => updateField(control.id || control.control_id, "owner_role", e.target.value)} placeholder="John Doe" />
                   </td>
 
                   <td className="control-frequency-cell">
-                    <input className="control-frequency-input" value={control.frequency || ""} onChange={(e) => updateField(control.id, "frequency", e.target.value)} placeholder="Monthly" />
+                    <input className="control-frequency-input" value={control.frequency} onChange={(e) => updateField(control.id || control.control_id, "frequency", e.target.value)} placeholder="Monthly" />
                   </td>
 
                   <td className="control-evidence-cell">
@@ -255,8 +258,6 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
                           <li key={idx}>{ev}</li>
                         ))}
                       </ul>
-                    ) : control.evidence ? (
-                      <div className="evidence-text">{control.evidence}</div>
                     ) : (
                       <div className="evidence-text">Not specified</div>
                     )}
@@ -275,8 +276,8 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
           </div>
           <div className="control-footer-right">
             <button className="control-save-btn" onClick={finalize} disabled={totalSelected === 0 || isSaving}>
-              <span>{isSaving ? '⏳' : '💾'}</span>
-              {isSaving ? 'Saving…' : `Save ${totalSelected} Control${totalSelected !== 1 ? 's' : ''}`}
+              <span>{isSaving ? "⏳" : "💾"}</span>
+              {isSaving ? "Saving…" : `Save ${totalSelected} Control${totalSelected !== 1 ? "s" : ""}`}
             </button>
             <button className="control-cancel-btn" onClick={onClose}>
               Cancel
@@ -297,7 +298,7 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
 
               <div className="control-detail-content">
                 <div className="control-detail-section">
-                  <h4>{selectedControlForDetails.title || selectedControlForDetails.control_title}</h4>
+                  <h4>{selectedControlForDetails.control_title}</h4>
                   <p className="control-id">ID: {selectedControlForDetails.control_id || selectedControlForDetails.id}</p>
 
                   {selectedControlForDetails.objective && (
@@ -307,10 +308,10 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
                     </div>
                   )}
 
-                  {selectedControlForDetails.description && (
+                  {selectedControlForDetails.control_description && (
                     <div className="detail-item">
                       <strong>📝 Description:</strong>
-                      <p>{selectedControlForDetails.description}</p>
+                      <p>{selectedControlForDetails.control_description}</p>
                     </div>
                   )}
 
@@ -377,7 +378,7 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
                   <div className="control-detail-meta">
                     <div className="meta-row">
                       <span>
-                        <strong>👤 Owner/Role:</strong> {selectedControlForDetails.owner_role || selectedControlForDetails.owner || "Not assigned"}
+                        <strong>👤 Owner/Role:</strong> {selectedControlForDetails.owner_role || "Not assigned"}
                       </span>
                       <span>
                         <strong>🔄 Frequency:</strong> {selectedControlForDetails.frequency || "Not specified"}
@@ -385,10 +386,7 @@ export const ControlTable: React.FC<ControlTableProps> = ({ controls, onFinalize
                     </div>
                     <div className="meta-row">
                       <span>
-                        <strong>📋 Status:</strong> {selectedControlForDetails.status || "Planned"}
-                      </span>
-                      <span>
-                        <strong>⚡ Priority:</strong> {selectedControlForDetails.priority || "Medium"}
+                        <strong>� Status:</strong> {selectedControlForDetails.status}
                       </span>
                     </div>
                     {selectedControlForDetails.policy_ref && (

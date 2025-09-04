@@ -1,5 +1,6 @@
 import os
 import time
+import json
 from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
@@ -86,14 +87,27 @@ def _ensure_controls_collection() -> Collection:
     _ensure_db()
     if not utility.has_collection(CONTROLS_COLLECTION_NAME):
         fields = [
-            FieldSchema(name="control_uid", dtype=DataType.VARCHAR, max_length=128, is_primary=True, auto_id=False),
+            # Primary key - using id from Control model (MongoDB _id)
+            FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=128, is_primary=True, auto_id=False),
             FieldSchema(name="user_id", dtype=DataType.VARCHAR, max_length=128),
-            FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=512),
-            FieldSchema(name="objective", dtype=DataType.VARCHAR, max_length=512),
+            # All fields from Control model
+            FieldSchema(name="control_id", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="control_title", dtype=DataType.VARCHAR, max_length=512),
+            FieldSchema(name="control_description", dtype=DataType.VARCHAR, max_length=2048),
+            FieldSchema(name="objective", dtype=DataType.VARCHAR, max_length=1024),
+            FieldSchema(name="annexA_map", dtype=DataType.VARCHAR, max_length=2048),  # JSON string of list
+            FieldSchema(name="linked_risk_ids", dtype=DataType.VARCHAR, max_length=1024),  # JSON string of list
+            FieldSchema(name="owner_role", dtype=DataType.VARCHAR, max_length=256),
+            FieldSchema(name="process_steps", dtype=DataType.VARCHAR, max_length=4096),  # JSON string of list
+            FieldSchema(name="evidence_samples", dtype=DataType.VARCHAR, max_length=4096),  # JSON string of list
+            FieldSchema(name="metrics", dtype=DataType.VARCHAR, max_length=2048),  # JSON string of list
+            FieldSchema(name="frequency", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="policy_ref", dtype=DataType.VARCHAR, max_length=512),
             FieldSchema(name="status", dtype=DataType.VARCHAR, max_length=64),
-            FieldSchema(name="annex", dtype=DataType.VARCHAR, max_length=64),
-            FieldSchema(name="risk_id", dtype=DataType.VARCHAR, max_length=128),
-            FieldSchema(name="control_text", dtype=DataType.VARCHAR, max_length=4096),
+            FieldSchema(name="rationale", dtype=DataType.VARCHAR, max_length=2048),
+            FieldSchema(name="assumptions", dtype=DataType.VARCHAR, max_length=2048),
+            # Combined text for embedding
+            FieldSchema(name="control_text", dtype=DataType.VARCHAR, max_length=8192),
             FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBED_DIM),
             FieldSchema(name="created_at", dtype=DataType.INT64),
             FieldSchema(name="updated_at", dtype=DataType.INT64),
@@ -306,6 +320,7 @@ class VectorIndexService:
 
 
 def _compose_control_text(control: Dict[str, Any]) -> str:
+    """Compose embedding text using exact Control model field names"""
     def _v(x):
         if x is None:
             return "-"
@@ -314,33 +329,42 @@ def _compose_control_text(control: Dict[str, Any]) -> str:
         if isinstance(x, dict):
             return ", ".join(f"{k}:{v}" for k, v in x.items())
         return str(x)
-    title = control.get("control_title") or control.get("title") or ""
-    desc = control.get("control_description") or control.get("description") or ""
+    
+    # Use exact field names from Control model
+    control_id = control.get("control_id") or ""
+    control_title = control.get("control_title") or ""
+    control_description = control.get("control_description") or ""
     objective = control.get("objective") or ""
-    owner = control.get("owner_role") or control.get("owner") or ""
-    freq = control.get("frequency") or ""
+    owner_role = control.get("owner_role") or ""
+    frequency = control.get("frequency") or ""
     status = control.get("status") or ""
-    policy = control.get("policy_ref") or ""
+    policy_ref = control.get("policy_ref") or ""
+    rationale = control.get("rationale") or ""
+    assumptions = control.get("assumptions") or ""
+    
+    # Handle complex fields
     metrics = control.get("metrics") or []
-    steps = control.get("process_steps") or []
-    evidence = control.get("evidence_samples") or control.get("evidence") or []
-    # Annex handling (new or legacy)
+    process_steps = control.get("process_steps") or []
+    evidence_samples = control.get("evidence_samples") or []
+    linked_risk_ids = control.get("linked_risk_ids") or []
+    
+    # Handle annexA_map
     annex_ids = []
-    aam = control.get("annexA_map") or []
-    if isinstance(aam, list):
-        for a in aam:
+    annexA_map = control.get("annexA_map") or []
+    if isinstance(annexA_map, list):
+        for a in annexA_map:
             if isinstance(a, dict) and a.get("id"):
                 annex_ids.append(a.get("id"))
-    ann_legacy = control.get("annex_reference") or ""
-    if ann_legacy:
-        annex_ids.append(str(ann_legacy))
-    linked = control.get("linked_risk_ids") or []
-    # Compose
+    
+    # Compose comprehensive text for embedding
     return (
-        f"Title: {_v(title)}. Objective: {_v(objective)}. Description: {_v(desc)}. "
-        f"Owner: {_v(owner)}. Frequency: {_v(freq)}. Status: {_v(status)}. Policy: {_v(policy)}. "
-        f"Annex: {_v(annex_ids)}. Linked risks: {_v(linked)}. "
-        f"Metrics: {_v(metrics)}. Steps: {_v(steps)}. Evidence: {_v(evidence)}."
+        f"Control ID: {_v(control_id)}. Title: {_v(control_title)}. "
+        f"Description: {_v(control_description)}. Objective: {_v(objective)}. "
+        f"Owner Role: {_v(owner_role)}. Frequency: {_v(frequency)}. Status: {_v(status)}. "
+        f"Policy Reference: {_v(policy_ref)}. Rationale: {_v(rationale)}. "
+        f"Assumptions: {_v(assumptions)}. Annex A Mapping: {_v(annex_ids)}. "
+        f"Linked Risk IDs: {_v(linked_risk_ids)}. Metrics: {_v(metrics)}. "
+        f"Process Steps: {_v(process_steps)}. Evidence Samples: {_v(evidence_samples)}."
     )
 
 
@@ -352,67 +376,85 @@ class ControlsVectorIndexService:
         collection = _ensure_controls_collection()
         embedder = _get_embedder()
         now = int(time.time() * 1000)
-        # Prepare rows
-        control_uids = []
+        
+        # Prepare rows using exact Control model field names
+        ids = []
         user_ids = []
-        titles = []
+        control_ids = []
+        control_titles = []
+        control_descriptions = []
         objectives = []
+        annexA_maps = []
+        linked_risk_ids_list = []
+        owner_roles = []
+        process_steps_list = []
+        evidence_samples_list = []
+        metrics_list = []
+        frequencies = []
+        policy_refs = []
         statuses = []
-        annexes = []
-        risk_ids = []
+        rationales = []
+        assumptions_list = []
         texts = []
+        
         for c in controls:
-            uid = str(c.get("_id") or c.get("id") or c.get("control_uid") or "")
-            if not uid:
+            # Use 'id' field (MongoDB _id) as primary key
+            control_id = str(c.get("id") or c.get("_id") or "")
+            if not control_id:
                 # skip if we don't have a unique id
                 continue
-            control_uids.append(uid)
+                
+            ids.append(control_id)
             user_ids.append(user_id)
-            title = c.get("control_title") or c.get("title") or ""
-            titles.append(title)
+            
+            # Store all Control model fields
+            control_ids.append(c.get("control_id") or "")
+            control_titles.append(c.get("control_title") or "")
+            control_descriptions.append(c.get("control_description") or "")
             objectives.append(c.get("objective") or "")
+            owner_roles.append(c.get("owner_role") or "")
+            frequencies.append(c.get("frequency") or "")
             statuses.append(c.get("status") or "")
-            # choose first annex id for filtering; full list stays in text
-            annex = ""
-            aam = c.get("annexA_map") or []
-            if isinstance(aam, list) and aam:
-                first = aam[0]
-                if isinstance(first, dict):
-                    annex = first.get("id") or ""
-            if not annex:
-                annex = c.get("annex_reference") or ""
-            annexes.append(annex)
-            rid = ""
-            linked = c.get("linked_risk_ids") or []
-            if isinstance(linked, list) and linked:
-                rid = str(linked[0])
-            else:
-                rid = str(c.get("risk_id") or "")
-            risk_ids.append(rid)
+            policy_refs.append(c.get("policy_ref") or "")
+            rationales.append(c.get("rationale") or "")
+            assumptions_list.append(c.get("assumptions") or "")
+            
+            # Handle complex fields - serialize as JSON strings
+            annexA_maps.append(json.dumps(c.get("annexA_map") or []))
+            linked_risk_ids_list.append(json.dumps(c.get("linked_risk_ids") or []))
+            process_steps_list.append(json.dumps(c.get("process_steps") or []))
+            evidence_samples_list.append(json.dumps(c.get("evidence_samples") or []))
+            metrics_list.append(json.dumps(c.get("metrics") or []))
+            
+            # Generate embedding text
             texts.append(_compose_control_text(c))
 
-        if not control_uids:
+        if not ids:
             return
 
         vectors = embedder.embed_documents(texts)
-        # delete-then-insert
-        expr = f"user_id == '{user_id}' && control_uid in {str(control_uids)}"
+        
+        # Delete existing records with same IDs, then insert new ones
+        expr = f"user_id == '{user_id}' && id in {str(ids)}"
         try:
             collection.delete(expr)
         except Exception:
             pass
+            
         data = [
-            control_uids, user_ids, titles, objectives, statuses,
-            annexes, risk_ids, texts, vectors,
-            [now]*len(control_uids), [now]*len(control_uids)
+            ids, user_ids, control_ids, control_titles, control_descriptions,
+            objectives, annexA_maps, linked_risk_ids_list, owner_roles,
+            process_steps_list, evidence_samples_list, metrics_list,
+            frequencies, policy_refs, statuses, rationales, assumptions_list,
+            texts, vectors, [now]*len(ids), [now]*len(ids)
         ]
         collection.insert(data)
         collection.flush()
 
     @staticmethod
-    def delete_by_control_uid(user_id: str, control_uid: str) -> None:
+    def delete_by_control_id(user_id: str, control_id: str) -> None:
         collection = _ensure_controls_collection()
-        expr = f"user_id == '{user_id}' && control_uid == '{str(control_uid)}'"
+        expr = f"user_id == '{user_id}' && id == '{str(control_id)}'"
         collection.delete(expr)
         collection.flush()
 
@@ -445,61 +487,153 @@ class ControlsVectorIndexService:
             # Vector search
             qvec = embedder.embed_query(qtext or "controls for this organization")
             expr = ControlsVectorIndexService._build_filter_expr(user_id, filters)
+            
+            # Define output fields based on Control model
+            output_fields = [
+                "id", "user_id", "control_id", "control_title", "control_description",
+                "objective", "annexA_map", "linked_risk_ids", "owner_role",
+                "process_steps", "evidence_samples", "metrics", "frequency",
+                "policy_ref", "status", "rationale", "assumptions", "control_text"
+            ]
+            
             res = collection.search(
                 data=[qvec],
                 anns_field="embedding",
                 param={"metric_type": "COSINE", "params": {"nprobe": 16}},
                 limit=limit,
                 expr=expr,
-                output_fields=[
-                    "control_uid", "user_id", "title", "objective", "status", "annex", "risk_id", "control_text"
-                ],
+                output_fields=output_fields,
             )
             for hit in (res[0] if res else []):
+                # Parse JSON fields back to lists/objects
+                annexA_map = []
+                linked_risk_ids = []
+                process_steps = []
+                evidence_samples = []
+                metrics = []
+                
+                try:
+                    annexA_map = json.loads(hit.entity.get("annexA_map") or "[]")
+                except:
+                    pass
+                try:
+                    linked_risk_ids = json.loads(hit.entity.get("linked_risk_ids") or "[]")
+                except:
+                    pass
+                try:
+                    process_steps = json.loads(hit.entity.get("process_steps") or "[]")
+                except:
+                    pass
+                try:
+                    evidence_samples = json.loads(hit.entity.get("evidence_samples") or "[]")
+                except:
+                    pass
+                try:
+                    metrics = json.loads(hit.entity.get("metrics") or "[]")
+                except:
+                    pass
+                
                 hits.append({
-                    "control_uid": hit.entity.get("control_uid"),
+                    "id": hit.entity.get("id"),
                     "score": float(hit.distance),
-                    "title": hit.entity.get("title"),
+                    "control_id": hit.entity.get("control_id"),
+                    "control_title": hit.entity.get("control_title"),
+                    "control_description": hit.entity.get("control_description"),
                     "objective": hit.entity.get("objective"),
+                    "annexA_map": annexA_map,
+                    "linked_risk_ids": linked_risk_ids,
+                    "owner_role": hit.entity.get("owner_role"),
+                    "process_steps": process_steps,
+                    "evidence_samples": evidence_samples,
+                    "metrics": metrics,
+                    "frequency": hit.entity.get("frequency"),
+                    "policy_ref": hit.entity.get("policy_ref"),
                     "status": hit.entity.get("status"),
-                    "annex": hit.entity.get("annex"),
-                    "risk_id": hit.entity.get("risk_id"),
+                    "rationale": hit.entity.get("rationale"),
+                    "assumptions": hit.entity.get("assumptions"),
                     "control_text": hit.entity.get("control_text"),
                 })
 
         # Fallback or list-all: fetch by user filter without ANN
         if list_all or not hits:
             expr = ControlsVectorIndexService._build_filter_expr(user_id, filters)
-            rows = collection.query(expr=expr, output_fields=[
-                "control_uid", "user_id", "title", "objective", "status", "annex", "risk_id", "control_text"
-            ])
+            output_fields = [
+                "id", "user_id", "control_id", "control_title", "control_description",
+                "objective", "annexA_map", "linked_risk_ids", "owner_role",
+                "process_steps", "evidence_samples", "metrics", "frequency",
+                "policy_ref", "status", "rationale", "assumptions", "control_text"
+            ]
+            rows = collection.query(expr=expr, output_fields=output_fields)
+            
             # Apply client-side filters for annex/risk_id
             f = filters or {}
             out = []
             for r in rows:
-                if f.get("annex") and not str(r.get("annex") or "").upper().startswith(str(f["annex"]).upper()):
-                    continue
-                if f.get("risk_id") and str(r.get("risk_id") or "") != str(f["risk_id"]):
-                    continue
+                # Parse JSON fields
+                annexA_map = []
+                linked_risk_ids = []
+                process_steps = []
+                evidence_samples = []
+                metrics = []
+                
+                try:
+                    annexA_map = json.loads(r.get("annexA_map") or "[]")
+                except:
+                    pass
+                try:
+                    linked_risk_ids = json.loads(r.get("linked_risk_ids") or "[]")
+                except:
+                    pass
+                try:
+                    process_steps = json.loads(r.get("process_steps") or "[]")
+                except:
+                    pass
+                try:
+                    evidence_samples = json.loads(r.get("evidence_samples") or "[]")
+                except:
+                    pass
+                try:
+                    metrics = json.loads(r.get("metrics") or "[]")
+                except:
+                    pass
+                
+                # Apply client-side filters
+                if f.get("annex"):
+                    # Check if any annexA_map item matches
+                    annex_match = False
+                    for annex_item in annexA_map:
+                        if isinstance(annex_item, dict) and annex_item.get("id", "").upper().startswith(str(f["annex"]).upper()):
+                            annex_match = True
+                            break
+                    if not annex_match:
+                        continue
+                        
+                if f.get("risk_id"):
+                    if str(f["risk_id"]) not in [str(rid) for rid in linked_risk_ids]:
+                        continue
+                
                 out.append({
-                    "control_uid": r.get("control_uid"),
-                    "title": r.get("title"),
+                    "id": r.get("id"),
+                    "control_id": r.get("control_id"),
+                    "control_title": r.get("control_title"),
+                    "control_description": r.get("control_description"),
                     "objective": r.get("objective"),
+                    "annexA_map": annexA_map,
+                    "linked_risk_ids": linked_risk_ids,
+                    "owner_role": r.get("owner_role"),
+                    "process_steps": process_steps,
+                    "evidence_samples": evidence_samples,
+                    "metrics": metrics,
+                    "frequency": r.get("frequency"),
+                    "policy_ref": r.get("policy_ref"),
                     "status": r.get("status"),
-                    "annex": r.get("annex"),
-                    "risk_id": r.get("risk_id"),
+                    "rationale": r.get("rationale"),
+                    "assumptions": r.get("assumptions"),
                     "control_text": r.get("control_text"),
                 })
             hits = out[:limit]
-        # Client-side optional filtering for annex, risk_id
+        # Build summary
         f = filters or {}
-        if f.get("annex"):
-            pref = str(f["annex"]).upper()
-            hits = [h for h in hits if str(h.get("annex") or "").upper().startswith(pref)]
-        if f.get("risk_id"):
-            rid = str(f["risk_id"]).strip()
-            hits = [h for h in hits if str(h.get("risk_id") or "") == rid]
-
         summary_bits = []
         if query:
             summary_bits.append(f'query="{query}"')
