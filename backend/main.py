@@ -1,9 +1,10 @@
 from fastapi import FastAPI, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from auth import router as auth_router, get_current_user
-from agent import run_agent, get_finalized_risks_summary, GREETING_MESSAGE
-from database import RiskDatabaseService, RiskProfileDatabaseService
-from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisks, FinalizedRisksResponse
+from agent import run_agent
+from helper import get_finalized_risks_summary
+from database import RiskDatabaseService, RiskProfileDatabaseService, ControlDatabaseService
+from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisks, FinalizedRisksResponse, Control, ControlResponse, ControlsResponse, AnnexAMapping
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
@@ -466,6 +467,47 @@ class RiskUpdateRequest(BaseModel):
     field: str
     value: str
 
+# Control Request Models
+class SaveControlRequest(BaseModel):
+    control_id: str
+    control_title: str
+    control_description: str
+    objective: str
+    annexA_map: List[dict] = []
+    owner_role: str = ""
+    process_steps: List[str] = []
+    evidence_samples: List[str] = []
+    metrics: List[str] = []
+    frequency: str = ""
+    policy_ref: str = ""
+    status: str = "Active"
+    rationale: str = ""
+    assumptions: str = ""
+
+class UpdateControlRequest(BaseModel):
+    control_title: Optional[str] = None
+    control_description: Optional[str] = None
+    objective: Optional[str] = None
+    annexA_map: Optional[List[dict]] = None
+    owner_role: Optional[str] = None
+    process_steps: Optional[List[str]] = None
+    evidence_samples: Optional[List[str]] = None
+    metrics: Optional[List[str]] = None
+    frequency: Optional[str] = None
+    policy_ref: Optional[str] = None
+    status: Optional[str] = None
+    rationale: Optional[str] = None
+    assumptions: Optional[str] = None
+
+class SaveControlsBulkRequest(BaseModel):
+    controls: List[SaveControlRequest]
+
+class BulkControlsResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[List[Control]] = None
+    failed: Optional[List[Dict[str, Any]]] = None
+
 @app.put("/risks/{risk_index}/update")
 async def update_risk_field(
     risk_index: int,
@@ -487,3 +529,167 @@ async def update_risk_field(
             "success": False,
             "message": f"Error updating risk field: {str(e)}"
         }
+
+# Control API Endpoints
+
+@app.post("/controls/save", response_model=ControlResponse)
+async def save_control(request: SaveControlRequest, current_user=Depends(get_current_user)):
+    """Save a new control"""
+    try:
+        user_id = current_user.get("username", "")
+        
+        result = await ControlDatabaseService.save_control(
+            user_id=user_id,
+            control_id=request.control_id,
+            control_title=request.control_title,
+            control_description=request.control_description,
+            objective=request.objective,
+            annexA_map=request.annexA_map,
+            linked_risk_ids=[],  # Empty initially, can be linked later
+            owner_role=request.owner_role,
+            process_steps=request.process_steps,
+            evidence_samples=request.evidence_samples,
+            metrics=request.metrics,
+            frequency=request.frequency,
+            policy_ref=request.policy_ref,
+            status=request.status,
+            rationale=request.rationale,
+            assumptions=request.assumptions
+        )
+        
+        return result
+    except Exception as e:
+        return ControlResponse(
+            success=False,
+            message=f"Error saving control: {str(e)}",
+            data=None
+        )
+
+@app.post("/controls/bulk-save", response_model=BulkControlsResponse)
+async def bulk_save_controls(request: SaveControlsBulkRequest, current_user=Depends(get_current_user)):
+    """Save multiple controls in a single API call and index them."""
+    try:
+        user_id = current_user.get("username", "")
+
+        saved: List[Control] = []
+        failed: List[Dict[str, Any]] = []
+
+        for item in request.controls:
+            try:
+                result = await ControlDatabaseService.save_control(
+                    user_id=user_id,
+                    control_id=item.control_id,
+                    control_title=item.control_title,
+                    control_description=item.control_description,
+                    objective=item.objective,
+                    annexA_map=item.annexA_map,
+                    linked_risk_ids=[],
+                    owner_role=item.owner_role,
+                    process_steps=item.process_steps,
+                    evidence_samples=item.evidence_samples,
+                    metrics=item.metrics,
+                    frequency=item.frequency,
+                    policy_ref=item.policy_ref,
+                    status=item.status,
+                    rationale=item.rationale,
+                    assumptions=item.assumptions,
+                )
+                if result.success and result.data:
+                    saved.append(result.data)
+                else:
+                    failed.append({
+                        "control_id": item.control_id,
+                        "message": result.message,
+                    })
+            except Exception as inner_e:
+                failed.append({
+                    "control_id": item.control_id,
+                    "message": str(inner_e),
+                })
+
+        msg = f"Saved {len(saved)} control(s)"
+        if failed:
+            msg += f", {len(failed)} failed"
+
+        return BulkControlsResponse(success=True, message=msg, data=saved, failed=failed or None)
+    except Exception as e:
+        return BulkControlsResponse(success=False, message=f"Error in bulk save: {str(e)}", data=None, failed=None)
+
+@app.get("/controls", response_model=ControlsResponse)
+async def get_user_controls(current_user=Depends(get_current_user)):
+    """Get all controls for the current user"""
+    try:
+        user_id = current_user.get("username", "")
+        result = await ControlDatabaseService.get_user_controls(user_id)
+        return result
+    except Exception as e:
+        return ControlsResponse(
+            success=False,
+            message=f"Error retrieving controls: {str(e)}",
+            data=None
+        )
+
+@app.get("/controls/by-risk/{risk_id}", response_model=ControlsResponse)
+async def get_controls_by_risk(risk_id: str, current_user=Depends(get_current_user)):
+    """Get all controls linked to a specific risk"""
+    try:
+        user_id = current_user.get("username", "")
+        result = await ControlDatabaseService.get_controls_by_risk_id(user_id, risk_id)
+        return result
+    except Exception as e:
+        return ControlsResponse(
+            success=False,
+            message=f"Error retrieving controls by risk: {str(e)}",
+            data=None
+        )
+
+@app.put("/controls/{control_id}", response_model=ControlResponse)
+async def update_control(
+    control_id: str, 
+    request: UpdateControlRequest, 
+    current_user=Depends(get_current_user)
+):
+    """Update an existing control"""
+    try:
+        user_id = current_user.get("username", "")
+        
+        # Build update data from request, excluding None values
+        update_data = {}
+        for field, value in request.dict(exclude_unset=True).items():
+            if value is not None:
+                update_data[field] = value
+        
+        if not update_data:
+            return ControlResponse(
+                success=False,
+                message="No fields provided for update",
+                data=None
+            )
+        
+        result = await ControlDatabaseService.update_control(
+            user_id=user_id,
+            control_id=control_id,
+            update_data=update_data
+        )
+        
+        return result
+    except Exception as e:
+        return ControlResponse(
+            success=False,
+            message=f"Error updating control: {str(e)}",
+            data=None
+        )
+
+@app.delete("/controls/{control_id}", response_model=ControlResponse)
+async def delete_control(control_id: str, current_user=Depends(get_current_user)):
+    """Delete a control by its control_id"""
+    try:
+        user_id = current_user.get("username", "")
+        result = await ControlDatabaseService.delete_control_by_id(user_id, control_id)
+        return result
+    except Exception as e:
+        return ControlResponse(
+            success=False,
+            message=f"Error deleting control: {str(e)}",
+            data=None
+        )

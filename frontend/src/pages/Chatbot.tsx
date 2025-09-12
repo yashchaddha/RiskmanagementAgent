@@ -3,6 +3,7 @@ import "./Chatbot.css";
 import logo from "../assets/logo.svg";
 import { RiskTable } from "./RiskTable";
 import { RiskRegister } from "./RiskRegister";
+import { ControlsTable } from "./ControlsTable";
 import { RiskProfileTable } from "./RiskProfileTable";
 import { MatrixPreviewModal } from "./MatrixPreviewModal";
 import { parseRisksFromLLMResponse } from "../utils/riskParser";
@@ -67,6 +68,29 @@ interface MatrixPreviewData {
   matrix_size: string;
   profiles: MatrixProfile[];
   totalProfiles: number;
+}
+interface AnnexAMapping {
+  id: string;
+  title: string;
+}
+interface ControlItem {
+  id?: string;
+  control_id: string;
+  control_title: string;
+  control_description: string;
+  objective: string;
+  annexA_map: AnnexAMapping[];
+  linked_risk_ids?: string[];
+  owner_role: string;
+  process_steps: string[];
+  evidence_samples: string[];
+  metrics: string[];
+  frequency: string;
+  policy_ref: string;
+  status: string;
+  rationale: string;
+  assumptions: string;
+  isSelected?: boolean;
 }
 
 // Global animation state to prevent restarts
@@ -191,6 +215,9 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const [matrixPreviewData, setMatrixPreviewData] = useState<MatrixPreviewData | null>(null);
   const [generatedRisks, setGeneratedRisks] = useState<Risk[]>([]);
   const [isFinalizingRisks, setIsFinalizingRisks] = useState(false);
+  const [showControlsTable, setShowControlsTable] = useState(false);
+  const [generatedControls, setGeneratedControls] = useState<ControlItem[]>([]);
+  const [isSavingControls, setIsSavingControls] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [animateMessageId, setAnimateMessageId] = useState<string | null>(null);
 
@@ -323,7 +350,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
         const data = await response.json();
 
         // Check if this response contains generated risks and format it
-        const formattedResponse = await checkForRiskGeneration(data.response);
+        const formattedResponse = await checkForRiskGeneration(data.response, data.risk_context);
 
         // Create bot message with formatted response
         const botMessage: Message = {
@@ -337,6 +364,13 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
         setAnimateMessageId(botMessage.id);
         setConversationHistory(data.conversation_history);
         setRiskContext(data.risk_context);
+
+        // If backend provided generated controls in risk_context, open the controls popup
+        const genControls = data?.risk_context?.generated_controls;
+        if (Array.isArray(genControls) && genControls.length > 0) {
+          setGeneratedControls(genControls);
+          setShowControlsTable(true);
+        }
       } else {
         const errorData = await response.json().catch(() => ({}));
         console.error("API Error:", response.status, errorData);
@@ -370,6 +404,76 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       setAnimateMessageId(errorMessage.id);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const saveSelectedControls = async (controls: ControlItem[]) => {
+    try {
+      setIsSavingControls(true);
+      const token = localStorage.getItem("token");
+      if (!token) throw new Error("No authentication token found");
+
+      // Bulk-save in a single API call for reliability
+      const payload = {
+        controls: controls.map((c) => ({
+          control_id: c.control_id,
+          control_title: c.control_title,
+          control_description: c.control_description,
+          objective: c.objective,
+          annexA_map: Array.isArray(c.annexA_map) ? c.annexA_map : [],
+          owner_role: c.owner_role || "",
+          process_steps: c.process_steps || [],
+          evidence_samples: c.evidence_samples || [],
+          metrics: c.metrics || [],
+          frequency: c.frequency || "",
+          policy_ref: c.policy_ref || "",
+          status: c.status || "Planned",
+          rationale: c.rationale || "",
+          assumptions: c.assumptions || "",
+        })),
+      };
+
+      const resp = await fetch("http://localhost:8000/controls/bulk-save", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const result = await resp.json().catch(() => ({} as any));
+      const savedCount = (result?.data?.length as number) || 0;
+      const failedCount = (result?.failed?.length as number) || 0;
+
+      // Close modal, clear context and notify user in chat
+      setShowControlsTable(false);
+      setGeneratedControls([]);
+      setRiskContext((prev) => {
+        const rc: any = { ...(prev || {}) };
+        if ((rc as any).generated_controls !== undefined) delete (rc as any).generated_controls;
+        return rc;
+      });
+      const botMessage: Message = {
+        id: (Date.now() + 2).toString(),
+        text: failedCount ? `Saved ${savedCount} control(s). ${failedCount} failed to save.` : `Saved ${savedCount} control(s) to your control library.`,
+        sender: "bot",
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, botMessage]);
+      setAnimateMessageId(botMessage.id);
+    } catch (e) {
+      console.error("Error saving controls:", e);
+      const botMessage: Message = {
+        id: (Date.now() + 2).toString(),
+        text: `There was an error saving your controls. Please try again.`,
+        sender: "bot",
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, botMessage]);
+      setAnimateMessageId(botMessage.id);
+    } finally {
+      setIsSavingControls(false);
     }
   };
 
@@ -792,26 +896,12 @@ Please try again or contact support if the issue persists.`,
     return riskRegisterIndicators.some((indicator) => message.toLowerCase().includes(indicator.toLowerCase()));
   };
 
-  const checkForRiskGeneration = async (response: string) => {
-    // Check if the response contains generated risks (JSON format or text format)
-    const hasJsonRisks = response.includes('"risks"') && response.includes('"description"');
-
-    // More specific risk generation indicators
-    const riskGenerationIndicators = ["generated risks for your organization", "risk assessment for", "applicable risks", "risk recommendations", "risk analysis results"];
-
-    // Check for preference update indicators to avoid false positives
-    const preferenceUpdateIndicators = ["current risk preference settings", "risk preference options", "updating to", "matrix configuration", "preference settings"];
-
-    const isPreferenceUpdate = preferenceUpdateIndicators.some((indicator) => response.toLowerCase().includes(indicator.toLowerCase()));
-
-    // Only proceed if it's not a preference update and contains risk generation indicators
-    if (!isPreferenceUpdate && (hasJsonRisks || riskGenerationIndicators.some((indicator) => response.toLowerCase().includes(indicator.toLowerCase())))) {
+  const checkForRiskGeneration = async (response: string, riskContext: any) => {
+    if (riskContext.generated_risks) {
       const parsedRisks = parseRisksFromLLMResponse(response);
       if (parsedRisks.length > 0) {
         setGeneratedRisks(parsedRisks);
         setShowRiskTable(true);
-
-        // Save risks to database
         await saveRisksToDatabase(parsedRisks);
 
         return formatRisksForChat(parsedRisks);
@@ -910,9 +1000,42 @@ Please try again or contact support if the issue persists.`,
         </div>
       )}
 
-      {showRiskTable && <RiskTable risks={generatedRisks} onRiskSelectionChange={handleRiskSelectionChange} onFinalize={handleFinalizeRisks} onClose={() => setShowRiskTable(false)} isFinalizing={isFinalizingRisks} />}
+      {showRiskTable && (
+        <RiskTable
+          risks={generatedRisks}
+          onRiskSelectionChange={handleRiskSelectionChange}
+          onFinalize={handleFinalizeRisks}
+          onClose={() => {
+            setShowRiskTable(false);
+            setGeneratedRisks([]);
+            setRiskContext((prev) => {
+              const rc: any = { ...(prev || {}) };
+              if (rc.generated_risks !== undefined) delete rc.generated_risks;
+              return rc;
+            });
+          }}
+          isFinalizing={isFinalizingRisks}
+        />
+      )}
 
       {showRiskRegister && <RiskRegister onClose={() => setShowRiskRegister(false)} />}
+
+      {showControlsTable && (
+        <ControlsTable
+          controls={generatedControls}
+          onClose={() => {
+            setShowControlsTable(false);
+            setGeneratedControls([]);
+            setRiskContext((prev) => {
+              const rc: any = { ...(prev || {}) };
+              if (rc.generated_controls !== undefined) delete rc.generated_controls;
+              return rc;
+            });
+          }}
+          onSaveSelected={saveSelectedControls}
+          isSaving={isSavingControls}
+        />
+      )}
 
       {showRiskProfileTable && <RiskProfileTable onClose={() => setShowRiskProfileTable(false)} />}
 

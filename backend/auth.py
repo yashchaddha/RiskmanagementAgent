@@ -13,7 +13,7 @@ load_dotenv()
 SECRET_KEY = os.getenv("JWT_SECRET", "supersecret")
 print(f"SECRET_KEY loaded: {'*' * len(SECRET_KEY) if SECRET_KEY else 'NOT SET'}")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 600
+ACCESS_TOKEN_EXPIRE_MINUTES = 60000
 MONGO_URI = os.getenv("MONGODB_URI")
 
 client = MongoClient(MONGO_URI)

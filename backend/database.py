@@ -3,8 +3,9 @@ from datetime import datetime
 from typing import List, Optional, Any
 from pymongo import MongoClient
 from bson import ObjectId
-from vector_index import VectorIndexService 
-from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisk, FinalizedRisks, FinalizedRisksResponse
+from uuid import uuid4
+from vector_index import VectorIndexService, ControlVectorIndexService 
+from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisk, FinalizedRisks, FinalizedRisksResponse, Control, ControlResponse, ControlsResponse, AnnexAMapping
 
 # Database result wrapper class
 class DatabaseResult:
@@ -22,7 +23,17 @@ db = client.isoriskagent
 generated_risks_collection = db.generated_risks
 finalized_risks_collection = db.finalized_risks
 users_collection = db.users
-risk_profiles_collection = db.risk_profiles # Added for risk profile collection
+risk_profiles_collection = db.risk_profiles
+controls_collection = db.controls
+
+def _to_str_id(obj):
+    if isinstance(obj, dict):
+        return {k: _to_str_id(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_str_id(x) for x in obj]
+    if isinstance(obj, ObjectId):
+        return str(obj)
+    return obj
 
 class RiskDatabaseService:
     @staticmethod
@@ -1237,3 +1248,622 @@ IMPORTANT: Return ONLY valid JSON. Do not include any other text."""
             return DatabaseResult(False, f"Error parsing JSON response: {str(e)}")
         except Exception as e:
             return DatabaseResult(False, f"Error generating matrix recommendation: {str(e)}")
+
+
+class ControlDatabaseService:
+    """Service for managing control entities"""
+    
+    @staticmethod
+    async def save_control(
+        user_id: str,
+        control_id: str,
+        control_title: str,
+        control_description: str,
+        objective: str,
+        annexA_map: List[dict] = None,
+        linked_risk_ids: List[str] = None,
+        owner_role: str = "",
+        process_steps: List[str] = None,
+        evidence_samples: List[str] = None,
+        metrics: List[str] = None,
+        frequency: str = "",
+        policy_ref: str = "",
+        status: str = "Active",
+        rationale: str = "",
+        assumptions: str = ""
+    ) -> ControlResponse:
+        """Save a new control for a user"""
+        try:
+            # Verify user exists in the users collection
+            user = users_collection.find_one({"username": user_id})
+            if not user:
+                return ControlResponse(
+                    success=False,
+                    message=f"User {user_id} not found in database",
+                    data=None
+                )
+            
+            # Set defaults for optional lists
+            annexA_map = annexA_map or []
+            linked_risk_ids = linked_risk_ids or []
+            process_steps = process_steps or []
+            evidence_samples = evidence_samples or []
+            metrics = metrics or []
+            
+            # Create the control document
+            control_document = {
+                "user_id": user_id,
+                "user_ref": user["_id"],
+                "control_id": control_id,
+                "control_title": control_title,
+                "control_description": control_description,
+                "objective": objective,
+                "annexA_map": annexA_map,
+                "linked_risk_ids": linked_risk_ids,
+                "owner_role": owner_role,
+                "process_steps": process_steps,
+                "evidence_samples": evidence_samples,
+                "metrics": metrics,
+                "frequency": frequency,
+                "policy_ref": policy_ref,
+                "status": status,
+                "rationale": rationale,
+                "assumptions": assumptions,
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
+            
+            # Insert into database
+            result = controls_collection.insert_one(control_document)
+            
+            # Get the inserted document
+            inserted_doc = controls_collection.find_one({"_id": result.inserted_id})
+            
+            # Convert to Control model
+            control = Control(
+                id=str(inserted_doc["_id"]),
+                control_id=inserted_doc["control_id"],
+                control_title=inserted_doc["control_title"],
+                control_description=inserted_doc["control_description"],
+                objective=inserted_doc["objective"],
+                annexA_map=[AnnexAMapping(**mapping) for mapping in inserted_doc["annexA_map"]],
+                linked_risk_ids=[],  # Will be populated by actual risk objects in link function
+                owner_role=inserted_doc["owner_role"],
+                process_steps=inserted_doc["process_steps"],
+                evidence_samples=inserted_doc["evidence_samples"],
+                metrics=inserted_doc["metrics"],
+                frequency=inserted_doc["frequency"],
+                policy_ref=inserted_doc["policy_ref"],
+                status=inserted_doc["status"],
+                rationale=inserted_doc["rationale"],
+                assumptions=inserted_doc["assumptions"],
+                user_id=inserted_doc["user_id"],
+                created_at=inserted_doc["created_at"],
+                updated_at=inserted_doc["updated_at"]
+            )
+            
+            # Add vector indexing after successful control creation
+            try:
+                # Convert Control model to dict for vector indexing
+                control_dict = {
+                    "control_id": control.control_id,
+                    "control_title": control.control_title,
+                    "control_description": control.control_description,
+                    "objective": control.objective,
+                    "annexA_map": [{"id": mapping.id, "title": mapping.title} for mapping in control.annexA_map],
+                    "owner_role": control.owner_role,
+                    "process_steps": control.process_steps,
+                    "evidence_samples": control.evidence_samples,
+                    "metrics": control.metrics,
+                    "frequency": control.frequency,
+                    "policy_ref": control.policy_ref,
+                    "status": control.status,
+                    "rationale": control.rationale,
+                    "assumptions": control.assumptions,
+                    "linked_risk_ids": control.linked_risk_ids  # Use actual FinalizedRisk objects from model
+                }
+                
+                ControlVectorIndexService.upsert_finalized_controls(
+                    user_id=user_id,
+                    organization_name="",  # Empty - not needed
+                    location="",           # Empty - not needed  
+                    domain="",            # Empty - not needed
+                    controls=[control_dict]
+                )
+            except Exception as e:
+                print(f"Warning: Failed to index control in vector database: {e}")
+            
+            return ControlResponse(
+                success=True,
+                message="Control saved successfully",
+                data=control
+            )
+            
+        except Exception as e:
+            return ControlResponse(
+                success=False,
+                message=f"Error saving control: {str(e)}",
+                data=None
+            )
+    
+    @staticmethod
+    async def get_user_controls(user_id: str) -> ControlsResponse:
+        """Get all controls for a specific user"""
+        try:
+            # Verify user exists
+            user = users_collection.find_one({"username": user_id})
+            if not user:
+                return ControlsResponse(
+                    success=False,
+                    message=f"User {user_id} not found in database",
+                    data=None
+                )
+            
+            # Find all controls for this user
+            control_docs = list(controls_collection.find({"user_ref": user["_id"]}))
+            
+            # Convert to Control models
+            controls = []
+            for doc in control_docs:
+                control = Control(
+                    id=str(doc["_id"]),
+                    control_id=doc["control_id"],
+                    control_title=doc["control_title"],
+                    control_description=doc["control_description"],
+                    objective=doc["objective"],
+                    annexA_map=[AnnexAMapping(**mapping) for mapping in doc.get("annexA_map", [])],
+                    linked_risk_ids=[],  # Will be populated by actual risk objects in link function
+                    owner_role=doc["owner_role"],
+                    process_steps=doc.get("process_steps", []),
+                    evidence_samples=doc.get("evidence_samples", []),
+                    metrics=doc.get("metrics", []),
+                    frequency=doc["frequency"],
+                    policy_ref=doc["policy_ref"],
+                    status=doc["status"],
+                    rationale=doc["rationale"],
+                    assumptions=doc["assumptions"],
+                    user_id=doc["user_id"],
+                    created_at=doc["created_at"],
+                    updated_at=doc["updated_at"]
+                )
+                controls.append(control)
+            
+            return ControlsResponse(
+                success=True,
+                message=f"Found {len(controls)} controls for user {user_id}",
+                data=controls
+            )
+            
+        except Exception as e:
+            return ControlsResponse(
+                success=False,
+                message=f"Error retrieving controls: {str(e)}",
+                data=None
+            )
+    
+    @staticmethod
+    async def get_control_by_id(user_id: str, control_id: str) -> ControlResponse:
+        """Get a specific control by its control_id"""
+        try:
+            # Verify user exists
+            user = users_collection.find_one({"username": user_id})
+            if not user:
+                return ControlResponse(
+                    success=False,
+                    message=f"User {user_id} not found in database",
+                    data=None
+                )
+            
+            # Find the control
+            control_doc = controls_collection.find_one({
+                "user_ref": user["_id"],
+                "control_id": control_id
+            })
+            
+            if not control_doc:
+                return ControlResponse(
+                    success=False,
+                    message=f"Control with ID {control_id} not found for user {user_id}",
+                    data=None
+                )
+            
+            # Convert to Control model
+            control = Control(
+                id=str(control_doc["_id"]),
+                control_id=control_doc["control_id"],
+                control_title=control_doc["control_title"],
+                control_description=control_doc["control_description"],
+                objective=control_doc["objective"],
+                annexA_map=[AnnexAMapping(**mapping) for mapping in control_doc.get("annexA_map", [])],
+                linked_risk_ids=[],  # Will be populated by actual risk objects in link function
+                owner_role=control_doc["owner_role"],
+                process_steps=control_doc.get("process_steps", []),
+                evidence_samples=control_doc.get("evidence_samples", []),
+                metrics=control_doc.get("metrics", []),
+                frequency=control_doc["frequency"],
+                policy_ref=control_doc["policy_ref"],
+                status=control_doc["status"],
+                rationale=control_doc["rationale"],
+                assumptions=control_doc["assumptions"],
+                user_id=control_doc["user_id"],
+                created_at=control_doc["created_at"],
+                updated_at=control_doc["updated_at"]
+            )
+            
+            return ControlResponse(
+                success=True,
+                message="Control found successfully",
+                data=control
+            )
+            
+        except Exception as e:
+            return ControlResponse(
+                success=False,
+                message=f"Error retrieving control: {str(e)}",
+                data=None
+            )
+    
+    @staticmethod
+    async def update_control(
+        user_id: str, 
+        control_id: str, 
+        update_data: dict
+    ) -> ControlResponse:
+        """Update an existing control"""
+        try:
+            # Verify user exists
+            user = users_collection.find_one({"username": user_id})
+            if not user:
+                return ControlResponse(
+                    success=False,
+                    message=f"User {user_id} not found in database",
+                    data=None
+                )
+            
+            # Verify control exists
+            control_doc = controls_collection.find_one({
+                "user_ref": user["_id"],
+                "control_id": control_id
+            })
+            
+            if not control_doc:
+                return ControlResponse(
+                    success=False,
+                    message=f"Control with ID {control_id} not found for user {user_id}",
+                    data=None
+                )
+            
+            # Valid fields that can be updated
+            valid_fields = [
+                "control_title", "control_description", "objective", "annexA_map",
+                "linked_risk_ids", "owner_role", "process_steps", "evidence_samples",
+                "metrics", "frequency", "policy_ref", "status", "rationale", "assumptions"
+            ]
+            
+            # Filter update_data to only include valid fields
+            filtered_update_data = {k: v for k, v in update_data.items() if k in valid_fields}
+            filtered_update_data["updated_at"] = datetime.utcnow()
+            
+            # Update the control
+            result = controls_collection.update_one(
+                {"_id": control_doc["_id"]},
+                {"$set": filtered_update_data}
+            )
+            
+            if result.modified_count > 0:
+                # Get the updated document
+                updated_doc = controls_collection.find_one({"_id": control_doc["_id"]})
+                
+                # Convert to Control model
+                control = Control(
+                    id=str(updated_doc["_id"]),
+                    control_id=updated_doc["control_id"],
+                    control_title=updated_doc["control_title"],
+                    control_description=updated_doc["control_description"],
+                    objective=updated_doc["objective"],
+                    annexA_map=[AnnexAMapping(**mapping) for mapping in updated_doc.get("annexA_map", [])],
+                    linked_risk_ids=[],  # Will be populated by actual risk objects in link function
+                    owner_role=updated_doc["owner_role"],
+                    process_steps=updated_doc.get("process_steps", []),
+                    evidence_samples=updated_doc.get("evidence_samples", []),
+                    metrics=updated_doc.get("metrics", []),
+                    frequency=updated_doc["frequency"],
+                    policy_ref=updated_doc["policy_ref"],
+                    status=updated_doc["status"],
+                    rationale=updated_doc["rationale"],
+                    assumptions=updated_doc["assumptions"],
+                    user_id=updated_doc["user_id"],
+                    created_at=updated_doc["created_at"],
+                    updated_at=updated_doc["updated_at"]
+                )
+                
+                return ControlResponse(
+                    success=True,
+                    message="Control updated successfully",
+                    data=control
+                )
+            else:
+                return ControlResponse(
+                    success=False,
+                    message="No changes were made to the control",
+                    data=None
+                )
+                
+        except Exception as e:
+            return ControlResponse(
+                success=False,
+                message=f"Error updating control: {str(e)}",
+                data=None
+            )
+    
+    @staticmethod
+    async def delete_control_by_id(user_id: str, control_id: str) -> ControlResponse:
+        """Delete a specific control by its control_id"""
+        try:
+            # Verify user exists
+            user = users_collection.find_one({"username": user_id})
+            if not user:
+                return ControlResponse(
+                    success=False,
+                    message=f"User {user_id} not found in database",
+                    data=None
+                )
+            
+            # Verify control exists
+            control_doc = controls_collection.find_one({
+                "user_ref": user["_id"],
+                "control_id": control_id
+            })
+            
+            if not control_doc:
+                return ControlResponse(
+                    success=False,
+                    message=f"Control with ID {control_id} not found for user {user_id}",
+                    data=None
+                )
+            
+            # Delete the control
+            result = controls_collection.delete_one({"_id": control_doc["_id"]})
+            
+            if result.deleted_count > 0:
+                # Add vector index deletion
+                try:
+                    ControlVectorIndexService.delete_by_control_id(user_id, control_id)
+                except Exception as e:
+                    print(f"Warning: Failed to delete control from vector database: {e}")
+                
+                return ControlResponse(
+                    success=True,
+                    message=f"Control {control_id} deleted successfully",
+                    data=None
+                )
+            else:
+                return ControlResponse(
+                    success=False,
+                    message="Failed to delete control",
+                    data=None
+                )
+                
+        except Exception as e:
+            return ControlResponse(
+                success=False,
+                message=f"Error deleting control: {str(e)}",
+                data=None
+            )
+    
+    @staticmethod
+    async def link_control_to_risks(
+        user_id: str,
+        control_id: str,
+        risk_ids: List[str]
+    ) -> ControlResponse:
+        """Link a control to specific finalized risks"""
+        try:
+            # Verify user exists
+            user = users_collection.find_one({"username": user_id})
+            if not user:
+                return ControlResponse(
+                    success=False,
+                    message=f"User {user_id} not found in database",
+                    data=None
+                )
+            
+            # Verify control exists
+            control_doc = controls_collection.find_one({
+                "user_ref": user["_id"],
+                "control_id": control_id
+            })
+            
+            if not control_doc:
+                return ControlResponse(
+                    success=False,
+                    message=f"Control with ID {control_id} not found for user {user_id}",
+                    data=None
+                )
+            
+            # Verify risks exist in finalized_risks collection
+            finalized_risks_doc = finalized_risks_collection.find_one({"user_ref": user["_id"]})
+            if not finalized_risks_doc:
+                return ControlResponse(
+                    success=False,
+                    message="No finalized risks found for user",
+                    data=None
+                )
+            
+            # Validate that all risk_ids exist in the user's finalized risks
+            valid_risk_ids = []
+            for risk_id in risk_ids:
+                # Find risk by its _id in the risks array
+                risk_found = False
+                for risk in finalized_risks_doc.get("risks", []):
+                    if str(risk.get("_id", "")) == risk_id:
+                        valid_risk_ids.append(risk_id)
+                        risk_found = True
+                        break
+                
+                if not risk_found:
+                    return ControlResponse(
+                        success=False,
+                        message=f"Risk with ID {risk_id} not found in finalized risks",
+                        data=None
+                    )
+            
+            # Update the control with linked risk IDs
+            result = controls_collection.update_one(
+                {"_id": control_doc["_id"]},
+                {
+                    "$set": {
+                        "linked_risk_ids": valid_risk_ids,
+                        "updated_at": datetime.utcnow()
+                    }
+                }
+            )
+            
+            if result.modified_count > 0:
+                return ControlResponse(
+                    success=True,
+                    message=f"Control linked to {len(valid_risk_ids)} risks successfully",
+                    data=None
+                )
+            else:
+                return ControlResponse(
+                    success=False,
+                    message="Failed to link control to risks",
+                    data=None
+                )
+                
+        except Exception as e:
+            return ControlResponse(
+                success=False,
+                message=f"Error linking control to risks: {str(e)}",
+                data=None
+            )
+    
+    @staticmethod
+    async def get_controls_by_risk_id(user_id: str, risk_id: str) -> ControlsResponse:
+        """Get all controls linked to a specific risk"""
+        try:
+            # Verify user exists
+            user = users_collection.find_one({"username": user_id})
+            if not user:
+                return ControlsResponse(
+                    success=False,
+                    message=f"User {user_id} not found in database",
+                    data=None
+                )
+            
+            # Find controls that have this risk_id in their linked_risk_ids array
+            control_docs = list(controls_collection.find({
+                "user_ref": user["_id"],
+                "linked_risk_ids": {"$in": [risk_id]}
+            }))
+            
+            # Convert to Control models
+            controls = []
+            for doc in control_docs:
+                control = Control(
+                    id=str(doc["_id"]),
+                    control_id=doc["control_id"],
+                    control_title=doc["control_title"],
+                    control_description=doc["control_description"],
+                    objective=doc["objective"],
+                    annexA_map=[AnnexAMapping(**mapping) for mapping in doc.get("annexA_map", [])],
+                    linked_risk_ids=[],  # Will be populated by actual risk objects in link function
+                    owner_role=doc["owner_role"],
+                    process_steps=doc.get("process_steps", []),
+                    evidence_samples=doc.get("evidence_samples", []),
+                    metrics=doc.get("metrics", []),
+                    frequency=doc["frequency"],
+                    policy_ref=doc["policy_ref"],
+                    status=doc["status"],
+                    rationale=doc["rationale"],
+                    assumptions=doc["assumptions"],
+                    user_id=doc["user_id"],
+                    created_at=doc["created_at"],
+                    updated_at=doc["updated_at"]
+                )
+                controls.append(control)
+            
+            return ControlsResponse(
+                success=True,
+                message=f"Found {len(controls)} controls linked to risk {risk_id}",
+                data=controls
+            )
+            
+        except Exception as e:
+            return ControlsResponse(
+                success=False,
+                message=f"Error retrieving controls by risk: {str(e)}",
+                data=None
+            )
+    
+    @staticmethod
+    async def update_control_status(
+        user_id: str,
+        control_id: str,
+        status: str
+    ) -> ControlResponse:
+        """Update a control's status"""
+        try:
+            # Verify user exists
+            user = users_collection.find_one({"username": user_id})
+            if not user:
+                return ControlResponse(
+                    success=False,
+                    message=f"User {user_id} not found in database",
+                    data=None
+                )
+            
+            # Verify control exists
+            control_doc = controls_collection.find_one({
+                "user_ref": user["_id"],
+                "control_id": control_id
+            })
+            
+            if not control_doc:
+                return ControlResponse(
+                    success=False,
+                    message=f"Control with ID {control_id} not found for user {user_id}",
+                    data=None
+                )
+            
+            # Valid statuses
+            valid_statuses = ["Active", "Inactive", "Under Review", "Deprecated", "Draft"]
+            if status not in valid_statuses:
+                return ControlResponse(
+                    success=False,
+                    message=f"Invalid status. Valid statuses: {', '.join(valid_statuses)}",
+                    data=None
+                )
+            
+            # Update the status
+            result = controls_collection.update_one(
+                {"_id": control_doc["_id"]},
+                {
+                    "$set": {
+                        "status": status,
+                        "updated_at": datetime.utcnow()
+                    }
+                }
+            )
+            
+            if result.modified_count > 0:
+                return ControlResponse(
+                    success=True,
+                    message=f"Control status updated to {status}",
+                    data=None
+                )
+            else:
+                return ControlResponse(
+                    success=False,
+                    message="No changes were made to control status",
+                    data=None
+                )
+                
+        except Exception as e:
+            return ControlResponse(
+                success=False,
+                message=f"Error updating control status: {str(e)}",
+                data=None
+            )
+        

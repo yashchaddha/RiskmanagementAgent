@@ -1,0 +1,212 @@
+.controls-table-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+  backdrop-filter: blur(5px);
+}
+
+.controls-table-modal {
+  background: #ffffff;
+  color: #222;
+  border-radius: 15px;
+  width: 95%;
+  max-width: 1400px;
+  max-height: 90vh;
+  overflow: hidden;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+}
+
+.controls-table-header {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #fff;
+  padding: 1.2rem 1.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.controls-table-header h3 {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 600;
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 1.6rem;
+  cursor: pointer;
+  padding: 0;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+
+.close-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.controls-table-subheader {
+  background: #f8f9fa;
+  padding: 0.8rem 1.6rem;
+  border-bottom: 1px solid #e9ecef;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+  color: #495057;
+  font-weight: 500;
+}
+
+.selected-count {
+  color: #6c757d;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.controls-table-wrapper {
+  flex: 1;
+  overflow: auto;
+  padding: 0;
+  overflow-x: auto;
+}
+
+.controls-table {
+  width: 100%;
+  min-width: 2200px;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  table-layout: auto;
+}
+
+.controls-table thead th {
+  background: #f8f9fa;
+  padding: 1rem;
+  text-align: left;
+  font-weight: 600;
+  color: #495057;
+  border-bottom: 2px solid #dee2e6;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.controls-table tbody td {
+  border-bottom: 1px solid #e9ecef;
+  padding: 1rem;
+  vertical-align: top;
+}
+
+.controls-table tr:hover {
+  background: #f8f9fa;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.wrap {
+  white-space: normal;
+  word-break: break-word;
+}
+
+.truncate {
+  max-width: 260px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Multiline clamp up to 4 lines */
+.clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+}
+
+/* Tooltip using data-full attribute */
+.tooltip { position: relative; }
+.tooltip::after {
+  content: attr(data-full);
+  position: absolute;
+  left: 0;
+  top: 100%;
+  transform: translateY(6px);
+  background: rgba(17, 17, 17, 0.95);
+  color: #fff;
+  border: 1px solid rgba(68,68,68,0.7);
+  padding: 8px 10px;
+  border-radius: 6px;
+  box-shadow: 0 6px 16px rgba(0,0,0,0.3);
+  z-index: 50;
+  opacity: 0;
+  visibility: hidden;
+  max-width: 600px;
+  white-space: pre-wrap;
+}
+.tooltip:hover::after { opacity: 1; visibility: visible; }
+
+/* Column minimum widths to improve readability */
+.cell-id { min-width: 140px; }
+.cell-title { min-width: 320px; }
+.cell-desc { min-width: 520px; }
+.cell-obj { min-width: 480px; }
+.cell-annex { min-width: 360px; }
+.cell-owner { min-width: 180px; }
+.cell-steps { min-width: 520px; }
+.cell-evidence { min-width: 520px; }
+.cell-metrics { min-width: 380px; }
+.cell-frequency { min-width: 160px; }
+.cell-policy { min-width: 260px; }
+.cell-status { min-width: 160px; }
+.cell-rationale { min-width: 420px; }
+.cell-assumptions { min-width: 420px; }
+
+.list {
+  margin: 0;
+  padding-left: 18px;
+}
+.list li {
+  margin: 2px 0;
+}
+
+.controls-table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  border-top: 1px solid #e9ecef;
+  background: #fff;
+}
+
+.close-table-btn, .save-btn {
+  background: #213150;
+  border: 1px solid #2e3e5f;
+  color: #e8eefc;
+  border-radius: 6px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.save-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
