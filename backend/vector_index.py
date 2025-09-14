@@ -24,10 +24,11 @@ VERSIONED_COLLECTION_NAME = f"{COLLECTION_NAME}_{COLLECTION_VERSION}"
 
 # Controls collection constants
 CONTROLS_COLLECTION_NAME = "finalized_controls_index"
-CONTROLS_COLLECTION_VERSION = "v1"
+CONTROLS_COLLECTION_VERSION = "v2"
 VERSIONED_CONTROLS_COLLECTION_NAME = f"{CONTROLS_COLLECTION_NAME}_{CONTROLS_COLLECTION_VERSION}"
 
-EMBED_DIM = 1536  # text-embedding-3-small
+EMBED_DIM = 1536  # text-embedding-3-small dimension
+EMBED_DIM_LARGE = 12288  # text-embedding-3-large dimension
 
 def _connect():
     # idempotent connect
@@ -126,7 +127,7 @@ def _ensure_controls_collection() -> Collection:
             FieldSchema(name="metrics", dtype=DataType.VARCHAR, max_length=4096),
             FieldSchema(name="linked_risk_ids", dtype=DataType.VARCHAR, max_length=2048),
             FieldSchema(name="control_text", dtype=DataType.VARCHAR, max_length=8192),
-            FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBED_DIM),
+            FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBED_DIM_LARGE),
             FieldSchema(name="created_at", dtype=DataType.INT64),
             FieldSchema(name="updated_at", dtype=DataType.INT64),
         ]
@@ -153,9 +154,9 @@ def _ensure_controls_collection() -> Collection:
 
     return collection
 
-def _get_embedder():
+def _get_embedder(model: str = "text-embedding-3-small"):
     # keep it isolated so we can swap later if needed
-    return OpenAIEmbeddings(model="text-embedding-3-small", api_key=os.getenv("OPENAI_API_KEY"))
+    return OpenAIEmbeddings(model=model, api_key=os.getenv("OPENAI_API_KEY"))
 
 def _truncate_field(value: str, max_length: int) -> str:
     """Truncate a string field to the specified max length"""
@@ -340,10 +341,10 @@ def _compose_control_sentence(
             "rationale": _v(control.get("rationale")),
             "assumptions": _v(control.get("assumptions")),
             "iso_mappings": _flatten_annexa_mappings(control.get("annexA_map")),
-            "process_steps": _flatten_list(control.get("process_steps"), "Process steps: "),
-            "evidence_samples": _flatten_list(control.get("evidence_samples"), "Evidence: "),
-            "metrics": _flatten_list(control.get("metrics"), "Metrics: "),
-            "linked_risks": _flatten_list(control.get("linked_risk_ids"), "Addresses risks: "),
+            "process_steps": _flatten_list(control.get("process_steps")),
+            "evidence_samples": _flatten_list(control.get("evidence_samples")),
+            "metrics": _flatten_list(control.get("metrics")),
+            "linked_risks": _flatten_list(control.get("linked_risk_ids")),
         }
 
         # Filter out None values for cleaner prompt
@@ -580,7 +581,7 @@ class ControlVectorIndexService:
             return
 
         collection = _ensure_controls_collection()
-        embedder = _get_embedder()
+        embedder = _get_embedder(model="text-embedding-3-large")
 
         # Prepare payloads with all control attributes
         now = int(time.time() * 1000)
@@ -654,7 +655,7 @@ class ControlVectorIndexService:
             
             # Generate comprehensive natural language paragraph using LLM
             control_text = _compose_control_sentence(c, organization_name, location, domain)
-            texts.append(_truncate_field(control_text, 8192))
+            texts.append(control_text)
 
         # Embed in batch the generated natural language paragraphs
         vectors = embedder.embed_documents(texts)
