@@ -4,6 +4,7 @@ import logo from "../assets/logo.svg";
 import { RiskTable } from "./RiskTable";
 import { RiskRegister } from "./RiskRegister";
 import { ControlsTable } from "./ControlsTable";
+import { ControlLibrary } from "./ControlLibrary";
 import { RiskProfileTable } from "./RiskProfileTable";
 import { MatrixPreviewModal } from "./MatrixPreviewModal";
 import { parseRisksFromLLMResponse } from "../utils/riskParser";
@@ -216,6 +217,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const [generatedRisks, setGeneratedRisks] = useState<Risk[]>([]);
   const [isFinalizingRisks, setIsFinalizingRisks] = useState(false);
   const [showControlsTable, setShowControlsTable] = useState(false);
+  const [showControlLibrary, setShowControlLibrary] = useState(false);
   const [generatedControls, setGeneratedControls] = useState<ControlItem[]>([]);
   const [isSavingControls, setIsSavingControls] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -316,6 +318,21 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
         text: "📋 Opening your Risk Register...\n\nI'll display all your finalized risks in a comprehensive view where you can search, filter, and review your risk assessment data.",
+        sender: "bot",
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, botMessage]);
+      setAnimateMessageId(botMessage.id);
+      setIsLoading(false);
+      return;
+    }
+
+    // Check for control library intent
+    if (checkForControlLibraryIntent(inputMessage)) {
+      setShowControlLibrary(true);
+      const botMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        text: "📚 Opening your Control Library...\n\nI'll display all your existing controls from the database. You can search, filter, and review all controls in your organization's control library.",
         sender: "bot",
         timestamp: new Date(),
       };
@@ -519,12 +536,14 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   };
 
   const getQuickActions = () => {
-    return ["Generate risks for our organization", "Open risk register", "Generate finalized risks summary", "Update my risk preferences", "Help me create a risk assessment framework"];
+    return ["Generate risks for our organization", "Open risk register", "Control Library", "Generate finalized risks summary", "Update my risk preferences", "Help me create a risk assessment framework"];
   };
 
   const handleQuickAction = (action: string) => {
     if (action === "Generate finalized risks summary") {
       generateRiskSummary();
+    } else if (action === "Control Library") {
+      setShowControlLibrary(true);
     } else {
       setInputMessage(action);
     }
@@ -897,6 +916,12 @@ Please try again or contact support if the issue persists.`,
     return riskRegisterIndicators.some((indicator) => message.toLowerCase().includes(indicator.toLowerCase()));
   };
 
+  const checkForControlLibraryIntent = (message: string): boolean => {
+    const controlLibraryIndicators = ["open control library", "show control library", "view control library", "display control library", "control library", "show controls", "view controls", "display controls", "my controls", "existing controls", "control database"];
+
+    return controlLibraryIndicators.some((indicator) => message.toLowerCase().includes(indicator.toLowerCase()));
+  };
+
   const checkForRiskGeneration = async (response: string, riskContext: any) => {
     if (riskContext.generated_risks) {
       const parsedRisks = parseRisksFromLLMResponse(response);
@@ -1039,6 +1064,8 @@ Please try again or contact support if the issue persists.`,
       )}
 
       {showRiskProfileTable && <RiskProfileTable onClose={() => setShowRiskProfileTable(false)} />}
+
+      {showControlLibrary && <ControlLibrary onClose={() => setShowControlLibrary(false)} />}
 
       {showMatrixPreviewModal && (
         <MatrixPreviewModal
