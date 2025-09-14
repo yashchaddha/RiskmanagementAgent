@@ -240,7 +240,7 @@ def semantic_control_search(query: str, user_id: str, annex_filter: Optional[str
       }
     """
     try:
-        emb = OpenAIEmbeddings(model="text-embedding-3-large")
+        emb = OpenAIEmbeddings(model="text-embedding-3-small")
         qv: List[float] = emb.embed_query(query)
 
         client = MilvusClient(
