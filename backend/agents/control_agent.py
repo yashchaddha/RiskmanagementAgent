@@ -5,7 +5,7 @@ from langchain.schema import HumanMessage, AIMessage, SystemMessage
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from dependencies import get_llm
 from agent import make_llm_call_with_history
-from rag_tools import semantic_risk_search, get_risk_profiles, knowledge_base_search, semantic_control_search
+from rag_tools import semantic_risk_search, fetch_controls_by_id, knowledge_base_search, semantic_control_search
 from models import LLMState
 import json
 import uuid
@@ -26,7 +26,11 @@ LANGSMITH_PROJECT_NAME = os.getenv("LANGCHAIN_PROJECT", "risk-management-agent")
 @traceable(project_name=LANGSMITH_PROJECT_NAME, name="control_node")
 def control_node(state: LLMState) -> LLMState:
     """
-    Conversational control intent classifier that routes to appropriate control sub-domain
+    Simplified control intent classifier that returns one of three tokens:
+    - generate_control: Generate new controls
+    - control_library: Search existing controls
+    - control_knowledge: Answer questions about controls
+    Or asks a clarifying question if intent is unclear.
     """
     print("Control Node Activated")
     
@@ -35,143 +39,47 @@ def control_node(state: LLMState) -> LLMState:
     user_data = state.get("user_data", {})
 
     # Override from prompts folder if available
-    system_prompt = load_prompt("control_classifier.txt")
+    system_prompt = """
+    You are a control routing specialist for a internal control management.
+    Based on the user's input, user's intent and the conversation history respond with exactly ONE of these three tokens:
+    - generate_control: If the user wants to create/generate new controls for risks (this node will directly create the controls)
+    - control_library: If the user wants to search/browse existing controls
+    - control_knowledge: If the user is asking questions about controls or implementation
+    
+    If the user's intent is unclear or doesn't match any of these categories, respond with a concise clarifying question.
+    
+    Examples:
+    "Create controls for my operational risks" → generate_control
+    "Show me all my controls for data privacy" → control_library
+    "How do I implement access control in my organization?" → control_knowledge
+    "I want to check my cybersecurity posture" → "Could you clarify if you'd like to review your existing controls, generate new controls, or learn about control implementation for cybersecurity?"
+    """
 
     try:
-        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
+        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history).strip()
         
-        # Parse JSON response
-        content = response_content.strip()
-        if content.startswith("```json") and content.endswith("```"):
-            content = content[7:-3].strip()
-        elif content.startswith("```") and content.endswith("```"):
-            content = content[3:-3].strip()
-        
-        try:
-            result = json.loads(content)
-        except json.JSONDecodeError:
-            # Try to extract JSON from response
-            start = content.find('{')
-            end = content.rfind('}') + 1
-            if start != -1 and end > start:
-                result = json.loads(content[start:end])
-            else:
-                # Fallback
-                result = {
-                    "action": "clarify",
-                    "sub_domain": None,
-                    "confidence": 0.0,
-                    "reasoning": "Could not parse intent",
-                    "clarifying_question": "I'd like to help you with security controls. Could you tell me more about what you're trying to accomplish - are you looking to create new controls, review existing ones, or learn about control concepts?"
-                }
-        
-        action = result.get("action", "clarify")
-        sub_domain = result.get("sub_domain")
-        confidence = result.get("confidence", 0.0)
-        reasoning = result.get("reasoning", "")
-        clarifying_question = result.get("clarifying_question", "")
-        parameters = result.get("parameters", {})
-        
-        print(f"DEBUG: Control node - Action: {action}, Sub-domain: {sub_domain}, Confidence: {confidence}")
-        print(f"DEBUG: Control node - Reasoning: {reasoning}")
-        print(f"DEBUG: Control node - Parameters: {parameters}")
-        
-        # Set control-related flags
-        state["is_control_related"] = True
-        
-        # Handle routing decision
-        if action == "route" and sub_domain and confidence >= 0.8:
-            if sub_domain == "generate_control":
+        # Check if response is one of the valid tokens
+        if response_content in ["generate_control", "control_library", "control_knowledge"]:
+            print(f"DEBUG: Control node routing to: {response_content}")
+            
+            # Set control-related flags
+            state["is_control_related"] = True
+            
+            if response_content == "generate_control":
                 state["control_target"] = "generate_control_node"
                 state["control_generation_requested"] = True
-                
-                # Extract and set control parameters
-                control_params = {}
-                if parameters:
-                    control_params["mode"] = parameters.get("mode", "all")
-                    if "risk_category" in parameters:
-                        control_params["risk_category"] = parameters["risk_category"]
-                    if "risk_id" in parameters:
-                        control_params["risk_id"] = parameters["risk_id"]
-                    if "risk_description" in parameters:
-                        control_params["risk_description"] = parameters["risk_description"]
-                else:
-                    # Fallback parameter extraction from user input
-                    user_lower = user_input.lower()
-                    if "risk" in user_lower and any(cat.lower() in user_lower for cat in ["financial", "operational", "strategic", "compliance", "technology", "cyber", "data", "hr", "environmental", "legal", "reputational", "supply"]):
-                        control_params["mode"] = "category"
-                        # Extract category name
-                        for cat in ["financial", "operational", "strategic", "compliance", "technology", "cyber security", "data privacy", "human resources", "environmental", "legal", "reputational", "supply chain"]:
-                            if cat.lower() in user_lower:
-                                control_params["risk_category"] = cat.title()
-                                break
-                    elif "risk" in user_lower and ("r-" in user_lower or "risk-" in user_lower):
-                        control_params["mode"] = "risk_id"
-                        # Try to extract risk ID
-                        import re
-                        risk_id_match = re.search(r'(r-\d+|risk-\d+)', user_lower)
-                        if risk_id_match:
-                            control_params["risk_id"] = risk_id_match.group(1).upper()
-                    else:
-                        control_params["mode"] = "all"
-                
-                state["control_parameters"] = control_params
-                
-                # Also set risk_description in state if mode is risk_description
-                if control_params.get("mode") == "risk_description":
-                    state["risk_description"] = control_params.get("risk_description", "")
-                
-                print(f"DEBUG: Routing to generate_control_node with parameters: {control_params}")
                 return state
-            elif sub_domain == "control_library":
+            elif response_content == "control_library":
                 state["control_target"] = "control_library_node"
-                state["control_generation_requested"] = False  # Library searches don't generate controls
-                
-                # Extract and set search parameters for control library
-                control_params = {}
-                if parameters:
-                    # Don't pass mode for control_library searches - let the library node handle the query directly
-                    control_params = {k: v for k, v in parameters.items() if k not in ["mode", "risk_category"]}
-                    if "annex_reference" in parameters:
-                        control_params["annex_reference"] = parameters["annex_reference"]
-                else:
-                    # Check if user is asking about specific Annex A references
-                    user_lower = user_input.lower()
-                    import re
-                    annex_match = re.search(r'a\.?\s*(\d+)\.?\s*(\d+)?', user_lower)
-                    if annex_match:
-                        annex_ref = f"A.{annex_match.group(1)}"
-                        if annex_match.group(2):
-                            annex_ref += f".{annex_match.group(2)}"
-                        control_params["annex_reference"] = annex_ref
-                
-                state["control_parameters"] = control_params
-                print(f"DEBUG: Routing to control_library_node with parameters: {control_params}")
+                state["control_generation_requested"] = False
                 return state
-            elif sub_domain == "control_knowledge":
+            elif response_content == "control_knowledge":
                 state["control_target"] = "control_knowledge_node"
-                state["control_generation_requested"] = False  # Knowledge queries don't generate controls
-                
-                # Extract and set knowledge parameters
-                control_params = {}
-                if parameters:
-                    control_params = {k: v for k, v in parameters.items()}
-                else:
-                    # Check for implementation questions
-                    user_lower = user_input.lower()
-                    if any(word in user_lower for word in ["implement", "deploy", "operationalize", "how to", "how can i"]):
-                        control_params["query_type"] = "implementation"
-                        # Try to extract control context from conversation
-                        if "this control" in user_lower or "the control" in user_lower:
-                            control_params["has_context"] = True
-                
-                state["control_parameters"] = control_params
-                print(f"DEBUG: Routing to control_knowledge_node with parameters: {control_params}")
+                state["control_generation_requested"] = False
                 return state
         
-        # Ask clarifying question
-        if not clarifying_question:
-            clarifying_question = "I'm here to help with security controls. Are you looking to create new controls, review existing ones you've saved, or learn about control frameworks and concepts?"
+        # If we get here, the response was a clarifying question
+        clarifying_question = response_content
         
         # Update conversation history and return response
         updated_history = conversation_history + [
@@ -205,92 +113,176 @@ def control_node(state: LLMState) -> LLMState:
 
 @traceable(project_name=LANGSMITH_PROJECT_NAME, name="control_library_node")
 def control_library_node(state: LLMState) -> LLMState:
-    """Conversational control library assistant for searching and managing user's controls"""
+    """Conversational control library assistant for searching and managing user's controls (tool-calling version)."""
     print("Control Library Node Activated")
-    
-    user_input = state.get("input", "")
-    user_data = state.get("user_data", {})
-    conversation_history = state.get("conversation_history", [])
+
+    user_input = state.get("input", "") or ""
+    user_data = state.get("user_data", {}) or {}
+    conversation_history = state.get("conversation_history", []) or []
     user_id = user_data.get("username") or user_data.get("user_id") or ""
-    model = get_llm()
     search_intent_prompt = load_prompt("control_library_assistant.txt", {"user_id": user_id})
 
+    # 1) Build messages (keep context tight)
+    messages = [SystemMessage(content=search_intent_prompt)]
+    recent_history = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
+    for ex in recent_history:
+        if ex.get("user"):
+            messages.append(HumanMessage(content=ex["user"]))
+        if ex.get("assistant"):
+            messages.append(AIMessage(content=ex["assistant"]))
+    messages.append(HumanMessage(content=user_input))
+
+    # 2) Bind tools directly (predictable tool-calling; small prompt)
+    model = get_llm()
+    # Include fetch_controls_by_id if you've added it; otherwise omit.
+    tools_list = [semantic_control_search, semantic_risk_search, fetch_controls_by_id]
+
+
+    llm = model.bind_tools(tools_list)
+    tool_registry = {t.name: t for t in tools_list}
+
+    # 3) Small deterministic loop (no planner). The model decides tools; we execute them.
+    MAX_TOOL_STEPS = 6
+    final_ai = None
     try:
-        messages = [SystemMessage(content=search_intent_prompt)]
-        recent_history = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
-        for ex in recent_history:
-            if ex.get("user"):
-                messages.append(HumanMessage(content=ex["user"]))
-            if ex.get("assistant"):
-                messages.append(AIMessage(content=ex["assistant"]))
+        for _ in range(MAX_TOOL_STEPS):
+            ai_msg = llm.invoke(messages)
+            messages.append(ai_msg)
+            final_ai = ai_msg
 
-        messages.append(HumanMessage(content=user_input))
-        # Create ReAct agent with all required tools
-        agent = create_react_agent(
-            model=model,
-            tools=[semantic_control_search, knowledge_base_search, semantic_risk_search]
-        )
+            tool_calls = getattr(ai_msg, "tool_calls", None) or []
+            if not tool_calls:
+                break  # model produced a final answer
 
-        # Track tool calls
-        tool_calls = []
-        result = agent.invoke({"messages": messages})
-        
-        # Extract tool calls from the result
-        for message in result.get("messages", []):
-            if hasattr(message, "tool_calls") and message.tool_calls:
-                tool_calls.extend(message.tool_calls)
-            elif isinstance(message, ToolMessage):
-                tool_calls.append(message)
-        
-        # Print tool calls for debugging
-        for tool_call in tool_calls:
-            print(f"Tool Call: {tool_call}")
-        
-        # Get the final result
+            for call in tool_calls:
+                tname = call.get("name")
+                if tname not in tool_registry:
+                    # Return a tool error back to the model
+                    messages.append(ToolMessage(
+                        content=f'{{"error":"unknown_tool","name":"{tname}"}}',
+                        tool_call_id=call.get("id"),
+                    ))
+                    continue
+
+                # Execute tool with model-proposed args
+                try:
+                    result = tool_registry[tname].invoke(call.get("args", {}))
+                except Exception as e:
+                    result = {"error": str(e)}
+
+                # IMPORTANT: return compact JSON/string to the model
+                import json
+                payload = result
+                if not isinstance(payload, str):
+                    payload = json.dumps(payload, ensure_ascii=False)
+                # Optional: hard cap payload size if a tool misbehaves
+                if len(payload) > 8000:
+                    payload = payload[:8000] + "…"
+
+                messages.append(ToolMessage(
+                    content=payload,
+                    tool_call_id=call.get("id"),
+                    name=tname,
+                ))
+
+        # 4) Extract final text
         final_text = ""
-        try:
-            msgs = result.get("messages", [])
-            if msgs:
-                last = msgs[-1]
-                final_text = getattr(last, "content", "") or ""
-                if isinstance(final_text, list):
-                    final_text = " ".join(
-                        [getattr(p, "content", p) for p in final_text if p]
-                    )
-        except Exception:
-            pass
+        if final_ai and getattr(final_ai, "content", None):
+            if isinstance(final_ai.content, list):
+                final_text = " ".join(part.content if hasattr(part, "content") else str(part)
+                                      for part in final_ai.content if part)
+            else:
+                final_text = str(final_ai.content)
 
-        if not final_text:
-            final_text = (
-                "I've opened your control library. You can ask me to search it, e.g., "
-                "“find controls related to cybersecurity” or “show data privacy controls.”"
-            )
+        if not final_text.strip():
+            # Try to synthesize an answer directly from the latest tool results
+            # Prefer the most recent semantic_control_search or fetch_controls_by_id output
+            latest_tool_payload = None
+            latest_tool_name = None
+            for m in reversed(messages):
+                if isinstance(m, ToolMessage) and isinstance(m.content, str):
+                    latest_tool_payload = m.content
+                    latest_tool_name = getattr(m, "name", None)
+                    # Use the most recent tool result
+                    break
+
+            synthesized_text = ""
+            if latest_tool_payload:
+                try:
+                    parsed = json.loads(latest_tool_payload)
+                    # Handle shortlist from semantic_control_search
+                    if isinstance(parsed, dict) and parsed.get("hits"):
+                        hits = parsed.get("hits", [])
+                        if hits:
+                            top = hits[:3]
+                            lines = []
+                            for h in top:
+                                cid = h.get("control_id") or h.get("id")
+                                title = h.get("title") or h.get("control_title")
+                                summary = h.get("summary") or h.get("control_text") or h.get("description")
+                                if summary:
+                                    summary = (summary.replace("\n", " ").strip())
+                                    if len(summary) > 180:
+                                        summary = summary[:180] + "…"
+                                line = f"• {cid}: {title} — {summary}" if (cid and title) else None
+                                if line:
+                                    lines.append(line)
+                            if lines:
+                                synthesized_text = (
+                                    "Here are the top controls I found:\n" + "\n".join(lines)
+                                )
+                    # Handle detailed fetch_controls_by_id response
+                    if not synthesized_text and isinstance(parsed, dict) and parsed.get("controls"):
+                        ctrls = parsed.get("controls", [])
+                        if ctrls:
+                            top = ctrls[:3]
+                            lines = []
+                            for c in top:
+                                cid = c.get("control_id")
+                                title = c.get("title") or c.get("control_title")
+                                desc = c.get("description") or c.get("control_description")
+                                if desc:
+                                    desc = (desc.replace("\n", " ").strip())
+                                    if len(desc) > 180:
+                                        desc = desc[:180] + "…"
+                                line = f"• {cid}: {title} — {desc}" if (cid and title) else None
+                                if line:
+                                    lines.append(line)
+                            if lines:
+                                synthesized_text = (
+                                    "Here are the top matching controls:\n" + "\n".join(lines)
+                                )
+                except Exception:
+                    # If parsing fails, fall back to default message below
+                    pass
+
+            if synthesized_text:
+                final_text = synthesized_text
+            else:
+                final_text = (
+                    "I’ve opened your control library. Try: “find controls for Annex A.8.30” "
+                    "or “list top controls mapped to data breach risks.”"
+                )
+
         updated_history = conversation_history + [{"user": user_input, "assistant": final_text}]
-
         return {
             "output": final_text,
             "conversation_history": updated_history,
             "user_data": user_data,
-            "control_generation_requested": False
+            "control_generation_requested": False,
         }
 
     except Exception as e:
-        print(f"Intent parsing failed: {e}")
+        print(f"control_library_node error: {e}")
         error_response = (
-            "I understand you want to access your control library. I’ve opened it. "
-            "You can ask me to search it (e.g., “find me cybersecurity controls”)."
+            "I understand you want your control library. It’s open. "
+            "You can ask me to search it (e.g., “find data privacy controls”)."
         )
         return {
             "output": error_response,
-            "conversation_history": (state.get("conversation_history", []) or []) + [
-                {"user": state.get("input", ""), "assistant": error_response}
-            ],
-            "risk_context": state.get("risk_context", {}),
-            "user_data": state.get("user_data", {}),
-            "risk_generation_requested": False,
+            "conversation_history": conversation_history + [{"user": user_input, "assistant": error_response}],
+            "user_data": user_data,
             "control_generation_requested": False,
-            "preference_update_requested": False,
-            "risk_register_requested": False
         }
 
 @traceable(project_name=LANGSMITH_PROJECT_NAME, name="control_knowledge_node")
@@ -303,7 +295,6 @@ def control_knowledge_node(state: LLMState) -> LLMState:
         user_organization = user_data.get("organization_name", "Unknown")
         user_location = user_data.get("location", "Unknown")
         user_domain = user_data.get("domain", "Unknown")
-        control_parameters = state.get("control_parameters", {})
 
         model = get_llm()
         system_prompt = load_prompt(
@@ -406,7 +397,7 @@ def control_generate_node(state: LLMState) -> LLMState:
         14. assumptions: Any assumptions made (can be empty string if none)
     6. Ensure the ISO 27001 Annex A mappings are accurate and relevant.
     7. Return the generated controls and the response text as STRICTLY JSON ONLY. No additional text. If no controls can be generated, return response_to_user with an explanation but still return valid JSON with an empty controls array. and follow the RESPONSE FORMAT below.
-
+**RESPOND IN STRICT JSON ONLY** NO EXTRA TEXT OUTSIDE THE JSON.
 JSON RESPONSE FORMAT:
 {{
   "response_to_user": "...",
@@ -483,29 +474,67 @@ JSON RESPONSE FORMAT:
         ]
 
         # add a control_id to each control in the format - CONTROL-<6 digit random number>
+        def _extract_json(text: str) -> str:
+            """Attempt to extract a JSON object from arbitrary LLM text, handling code fences and extra text.
+            Returns a JSON string (best-effort) or raises ValueError if none can be found.
+            """
+            t = (text or "").strip()
+            # Strip code fences first
+            if t.startswith("```json") and t.endswith("```"):
+                return t[7:-3].strip()
+            if t.startswith("```") and t.endswith("```"):
+                return t[3:-3].strip()
+            # If the whole thing looks like JSON already
+            if t.startswith("{") and t.endswith("}"):
+                return t
+            # Try to find the first balanced JSON object
+            start = t.find("{")
+            if start == -1:
+                raise ValueError("No JSON object start found")
+            depth = 0
+            for i in range(start, len(t)):
+                ch = t[i]
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return t[start:i+1]
+            raise ValueError("Unbalanced JSON braces in content")
+
         content = response_content.strip()
-        if content.startswith("```json") and content.endswith("```"):
-            content = content[7:-3].strip()
-        elif content.startswith("```") and content.endswith("```"):
-            content = content[3:-3].strip()
+        try:
+            content = _extract_json(content)
+        except Exception:
+            # Keep original content for logging, but it will likely fail to parse
+            pass
+
         print(f"Raw response content extracted: {content}")
 
+        # Ensure defaults so we don't reference before assignment on error paths
+        response_to_user = ""
+        controls = []
         try:
             output = json.loads(content)
-            controls = output.get("controls", [])
-            response_to_user = output.get("response_to_user", "")
+            controls = output.get("controls", []) or []
+            response_to_user = output.get("response_to_user", "") or ""
             for control in controls:
                 control["control_id"] = f"CONTROL-{random.randint(100000, 999999)}"
             print(f"Parsed controls with IDs: {controls}")
         except json.JSONDecodeError:
             print("Failed to parse JSON from response content")
             state["control_generation_requested"] = False
-            state["output"] = response_to_user or "I couldn't generate controls based on the provided information. Please try rephrasing or providing more details."
+            # Preserve conversation, provide graceful fallback
+            state["conversation_history"] = updated_history
+            fallback = response_to_user or "I couldn't generate controls based on the provided information. Please try rephrasing or providing more details."
+            state["output"] = fallback
             return state
         except Exception as e:
             print(f"Unexpected error parsing controls: {e}")
             state["control_generation_requested"] = False
-            state["output"] = response_to_user or "I couldn't generate controls based on the provided information. Please try rephrasing or providing more details."
+            state["conversation_history"] = updated_history
+            fallback = response_to_user or "I couldn't generate controls based on the provided information. Please try rephrasing or providing more details."
+            state["output"] = fallback
             return state
         
         state["risk_context"] = state.get("risk_context", {}) or {}

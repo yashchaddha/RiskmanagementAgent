@@ -351,15 +351,15 @@ def _compose_control_sentence(
 
         # Enhanced LLM prompt for comprehensive control paragraph generation
         user_prompt = f"""
-Convert the following security control data into a comprehensive, natural language paragraph suitable for semantic search.
+Convert the following control data into a comprehensive, natural language paragraph suitable for semantic search.
 
 Requirements:
-- Write a detailed 2-3 sentence paragraph that captures all the key control information
+- Write a detailed paragraph that captures all the key control information
 - Use natural, flowing language that would be easy to search semantically
 - Include organization context, control details, implementation approach, and compliance mappings
 - Do not use bullet points or structured formats
-- Make it sound like a professional security control description
-- Include ISO 27001 mappings if present
+- Make it sound like a professional control description
+- Include ISO 27001 Annex A mappings if present
 
 Control Data:
 {json.dumps(filtered_payload, indent=2, ensure_ascii=False)}
@@ -368,7 +368,7 @@ Write only the paragraph, no other text or formatting:
 """
 
         resp = llm.invoke([
-            {"role": "system", "content": "You are a professional cybersecurity expert who writes comprehensive, searchable security control descriptions. Create detailed paragraphs that capture all relevant control information in natural language."},
+            {"role": "system", "content": "You are a professional internal controls expert who writes comprehensive, searchable control descriptions. Create detailed paragraphs that capture all relevant control information in natural language."},
             {"role": "user", "content": user_prompt}
         ])
         
@@ -397,9 +397,9 @@ Write only the paragraph, no other text or formatting:
     
     org_context = ", ".join(parts) if parts else "Organization"
     
-    control_title = _v(control.get("control_title")) or "Security Control"
-    control_desc = _v(control.get("control_description")) or "Unspecified control"
-    objective = _v(control.get("objective")) or "security management"
+    control_title = _v(control.get("control_title"))
+    control_desc = _v(control.get("control_description"))
+    objective = _v(control.get("objective"))
     
     paragraph = f"{org_context} implements {control_title}: {control_desc}. This control aims to {objective.lower()}."
     

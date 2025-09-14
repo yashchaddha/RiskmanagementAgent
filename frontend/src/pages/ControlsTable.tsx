@@ -110,6 +110,7 @@ export const ControlsTable: React.FC<ControlsTableProps> = ({ controls, onClose,
   const [localControls, setLocalControls] = useState<ControlItem[]>([]);
   const [selectedRisk, setSelectedRisk] = useState<RiskItem | null>(null);
   const [isLoadingRisk, setIsLoadingRisk] = useState(false);
+  const [editedControls, setEditedControls] = useState<{[key: string]: Partial<ControlItem>}>({});
 
   useEffect(() => {
     // Initialize selection state
@@ -124,6 +125,21 @@ export const ControlsTable: React.FC<ControlsTableProps> = ({ controls, onClose,
 
   const toggleRow = (idx: number, checked: boolean) => {
     setLocalControls((prev) => prev.map((c, i) => (i === idx ? { ...c, isSelected: checked } : c)));
+  };
+
+  const updateControlField = (controlId: string, field: keyof ControlItem, value: any) => {
+    setEditedControls(prev => ({
+      ...prev,
+      [controlId]: {
+        ...prev[controlId],
+        [field]: value
+      }
+    }));
+  };
+
+  const getControlFieldValue = (control: ControlItem, field: keyof ControlItem) => {
+    const edited = editedControls[control.control_id];
+    return edited && edited[field] !== undefined ? edited[field] : control[field];
   };
 
   const fetchRiskDetails = async (riskId: string) => {
@@ -218,10 +234,16 @@ export const ControlsTable: React.FC<ControlsTableProps> = ({ controls, onClose,
             </thead>
             <tbody>
               {localControls.map((c, idx) => {
-                const annexFull = Array.isArray(c.annexA_map) ? c.annexA_map.map((a) => `${a.id}${a.title ? `: ${a.title}` : ""}`).join("; ") : "";
-                const stepsFull = Array.isArray(c.process_steps) ? c.process_steps.join("; ") : "";
-                const evidenceFull = Array.isArray(c.evidence_samples) ? c.evidence_samples.join("; ") : "";
-                const metricsFull = Array.isArray(c.metrics) ? c.metrics.join("; ") : "";
+                const currentAnnexA = getControlFieldValue(c, 'annexA_map') as AnnexAMapping[];
+                const currentProcessSteps = getControlFieldValue(c, 'process_steps') as string[];
+                const currentEvidenceSamples = getControlFieldValue(c, 'evidence_samples') as string[];
+                const currentMetrics = getControlFieldValue(c, 'metrics') as string[];
+
+                const annexFull = Array.isArray(currentAnnexA) ? currentAnnexA.map((a) => `${a.id}${a.title ? `: ${a.title}` : ""}`).join("; ") : "";
+                const stepsFull = Array.isArray(currentProcessSteps) ? currentProcessSteps.join("; ") : "";
+                const evidenceFull = Array.isArray(currentEvidenceSamples) ? currentEvidenceSamples.join("; ") : "";
+                const metricsFull = Array.isArray(currentMetrics) ? currentMetrics.join("; ") : "";
+
                 return (
                   <tr key={c.control_id + idx}>
                     <td>
@@ -239,19 +261,28 @@ export const ControlsTable: React.FC<ControlsTableProps> = ({ controls, onClose,
                       </div>
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-title" title={c.control_title} data-full={c.control_title}>
-                        {c.control_title}
-                      </div>
+                      <textarea
+                        className="editable-field cell-title-input"
+                        value={getControlFieldValue(c, 'control_title') as string || ''}
+                        onChange={(e) => updateControlField(c.control_id, 'control_title', e.target.value)}
+                        rows={2}
+                      />
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-desc" title={c.control_description} data-full={c.control_description}>
-                        {c.control_description}
-                      </div>
+                      <textarea
+                        className="editable-field cell-desc-input"
+                        value={getControlFieldValue(c, 'control_description') as string || ''}
+                        onChange={(e) => updateControlField(c.control_id, 'control_description', e.target.value)}
+                        rows={3}
+                      />
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-obj" title={c.objective} data-full={c.objective}>
-                        {c.objective}
-                      </div>
+                      <textarea
+                        className="editable-field cell-obj-input"
+                        value={getControlFieldValue(c, 'objective') as string || ''}
+                        onChange={(e) => updateControlField(c.control_id, 'objective', e.target.value)}
+                        rows={2}
+                      />
                     </td>
                     <td>
                       <div className="clamp tooltip cell-linked-risks">
@@ -270,54 +301,112 @@ export const ControlsTable: React.FC<ControlsTableProps> = ({ controls, onClose,
                       </div>
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-annex" title={annexFull} data-full={annexFull}>
-                        {annexFull || "-"}
-                      </div>
+                      <textarea
+                        className="editable-field cell-annex-input"
+                        value={annexFull}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          const annexMappings = value ? value.split(';').map(item => {
+                            const trimmed = item.trim();
+                            const colonIndex = trimmed.indexOf(':');
+                            if (colonIndex > 0) {
+                              return {
+                                id: trimmed.substring(0, colonIndex).trim(),
+                                title: trimmed.substring(colonIndex + 1).trim()
+                              };
+                            }
+                            return { id: trimmed, title: '' };
+                          }) : [];
+                          updateControlField(c.control_id, 'annexA_map', annexMappings);
+                        }}
+                        rows={2}
+                      />
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-owner" title={c.owner_role || ""} data-full={c.owner_role || ""}>
-                        {c.owner_role || ""}
-                      </div>
+                      <input
+                        type="text"
+                        className="editable-field cell-owner-input"
+                        value={getControlFieldValue(c, 'owner_role') as string || ''}
+                        onChange={(e) => updateControlField(c.control_id, 'owner_role', e.target.value)}
+                      />
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-steps" title={stepsFull} data-full={stepsFull}>
-                        {stepsFull || "-"}
-                      </div>
+                      <textarea
+                        className="editable-field cell-steps-input"
+                        value={stepsFull}
+                        onChange={(e) => {
+                          const steps = e.target.value ? e.target.value.split(';').map(s => s.trim()).filter(s => s) : [];
+                          updateControlField(c.control_id, 'process_steps', steps);
+                        }}
+                        rows={2}
+                      />
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-evidence" title={evidenceFull} data-full={evidenceFull}>
-                        {evidenceFull || "-"}
-                      </div>
+                      <textarea
+                        className="editable-field cell-evidence-input"
+                        value={evidenceFull}
+                        onChange={(e) => {
+                          const evidence = e.target.value ? e.target.value.split(';').map(s => s.trim()).filter(s => s) : [];
+                          updateControlField(c.control_id, 'evidence_samples', evidence);
+                        }}
+                        rows={2}
+                      />
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-metrics" title={metricsFull} data-full={metricsFull}>
-                        {metricsFull || "-"}
-                      </div>
+                      <textarea
+                        className="editable-field cell-metrics-input"
+                        value={metricsFull}
+                        onChange={(e) => {
+                          const metrics = e.target.value ? e.target.value.split(';').map(s => s.trim()).filter(s => s) : [];
+                          updateControlField(c.control_id, 'metrics', metrics);
+                        }}
+                        rows={2}
+                      />
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-frequency" title={c.frequency || ""} data-full={c.frequency || ""}>
-                        {c.frequency || ""}
-                      </div>
+                      <input
+                        type="text"
+                        className="editable-field cell-frequency-input"
+                        value={getControlFieldValue(c, 'frequency') as string || ''}
+                        onChange={(e) => updateControlField(c.control_id, 'frequency', e.target.value)}
+                      />
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-policy" title={c.policy_ref || ""} data-full={c.policy_ref || ""}>
-                        {c.policy_ref || ""}
-                      </div>
+                      <input
+                        type="text"
+                        className="editable-field cell-policy-input"
+                        value={getControlFieldValue(c, 'policy_ref') as string || ''}
+                        onChange={(e) => updateControlField(c.control_id, 'policy_ref', e.target.value)}
+                      />
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-status" title={c.status || "Planned"} data-full={c.status || "Planned"}>
-                        {c.status || "Planned"}
-                      </div>
+                      <select
+                        className="editable-field cell-status-input"
+                        value={getControlFieldValue(c, 'status') as string || 'Planned'}
+                        onChange={(e) => updateControlField(c.control_id, 'status', e.target.value)}
+                      >
+                        <option value="Planned">Planned</option>
+                        <option value="In Progress">In Progress</option>
+                        <option value="Implemented">Implemented</option>
+                        <option value="Under Review">Under Review</option>
+                        <option value="Approved">Approved</option>
+                      </select>
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-rationale" title={c.rationale || ""} data-full={c.rationale || ""}>
-                        {c.rationale || ""}
-                      </div>
+                      <textarea
+                        className="editable-field cell-rationale-input"
+                        value={getControlFieldValue(c, 'rationale') as string || ''}
+                        onChange={(e) => updateControlField(c.control_id, 'rationale', e.target.value)}
+                        rows={2}
+                      />
                     </td>
                     <td>
-                      <div className="clamp tooltip cell-assumptions" title={c.assumptions || ""} data-full={c.assumptions || ""}>
-                        {c.assumptions || ""}
-                      </div>
+                      <textarea
+                        className="editable-field cell-assumptions-input"
+                        value={getControlFieldValue(c, 'assumptions') as string || ''}
+                        onChange={(e) => updateControlField(c.control_id, 'assumptions', e.target.value)}
+                        rows={2}
+                      />
                     </td>
                   </tr>
                 );
@@ -330,7 +419,13 @@ export const ControlsTable: React.FC<ControlsTableProps> = ({ controls, onClose,
           <button className="close-table-btn" onClick={onClose}>
             Close
           </button>
-          <button className="save-btn" onClick={() => onSaveSelected(localControls.filter((c) => c.isSelected))} disabled={selectedCount === 0 || isSaving}>
+          <button className="save-btn" onClick={() => {
+            const selectedControls = localControls.filter((c) => c.isSelected).map(control => {
+              const edits = editedControls[control.control_id];
+              return edits ? { ...control, ...edits } : control;
+            });
+            onSaveSelected(selectedControls);
+          }} disabled={selectedCount === 0 || isSaving}>
             {isSaving ? "Saving Controls..." : "Finalize Controls"}
           </button>
         </div>

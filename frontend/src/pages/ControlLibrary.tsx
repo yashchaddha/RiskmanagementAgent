@@ -6,6 +6,22 @@ export interface AnnexAMapping {
   title: string;
 }
 
+export interface RiskItem {
+  id: string;
+  description: string;
+  category: string;
+  likelihood: string;
+  impact: string;
+  treatment_strategy: string;
+  asset_value?: string;
+  department?: string;
+  risk_owner?: string;
+  security_impact?: string;
+  target_date?: string;
+  risk_progress?: string;
+  residual_exposure?: string;
+}
+
 export interface ControlItem {
   id?: string;
   control_id: string;
@@ -27,6 +43,62 @@ export interface ControlItem {
   updated_at?: string;
 }
 
+interface RiskModalProps {
+  risk: RiskItem | null;
+  onClose: () => void;
+}
+
+const RiskDetailModal: React.FC<RiskModalProps> = ({ risk, onClose }) => {
+  if (!risk) return null;
+
+  return (
+    <div className="risk-modal-overlay">
+      <div className="risk-modal">
+        <div className="risk-modal-header">
+          <h3>Risk Detail: {risk.id}</h3>
+          <button className="close-btn-risk" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        <div className="risk-modal-content">
+          <div className="risk-detail-row">
+            <span className="risk-label">Description:</span>
+            <span className="risk-value">{risk.description}</span>
+          </div>
+          <div className="risk-detail-row">
+            <span className="risk-label">Category:</span>
+            <span className="risk-value">{risk.category}</span>
+          </div>
+          <div className="risk-detail-row">
+            <span className="risk-label">Likelihood:</span>
+            <span className="risk-value">{risk.likelihood}</span>
+          </div>
+          <div className="risk-detail-row">
+            <span className="risk-label">Impact:</span>
+            <span className="risk-value">{risk.impact}</span>
+          </div>
+          <div className="risk-detail-row">
+            <span className="risk-label">Treatment:</span>
+            <span className="risk-value">{risk.treatment_strategy}</span>
+          </div>
+          {risk.risk_owner && (
+            <div className="risk-detail-row">
+              <span className="risk-label">Owner:</span>
+              <span className="risk-value">{risk.risk_owner}</span>
+            </div>
+          )}
+          {risk.department && (
+            <div className="risk-detail-row">
+              <span className="risk-label">Department:</span>
+              <span className="risk-value">{risk.department}</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 interface ControlLibraryProps {
   onClose: () => void;
 }
@@ -39,6 +111,8 @@ export const ControlLibrary: React.FC<ControlLibraryProps> = ({ onClose }) => {
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [sortBy, setSortBy] = useState<keyof ControlItem>("control_id");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
+  const [selectedRisk, setSelectedRisk] = useState<RiskItem | null>(null);
+  const [isLoadingRisk, setIsLoadingRisk] = useState(false);
 
   useEffect(() => {
     fetchControls();
@@ -112,6 +186,44 @@ export const ControlLibrary: React.FC<ControlLibraryProps> = ({ onClose }) => {
     }
   };
 
+  const fetchRiskDetails = async (riskId: string) => {
+    setIsLoadingRisk(true);
+    try {
+      const response = await fetch(`http://localhost:8000/risks/finalized`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("token")}`,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to fetch risks");
+      }
+
+      const data = await response.json();
+      if (data.success && data.data && data.data.risks) {
+        const foundRisk = data.data.risks.find((r: any) => r.id === riskId);
+        if (foundRisk) {
+          setSelectedRisk(foundRisk);
+        } else {
+          alert(`Risk with ID ${riskId} not found`);
+        }
+      } else {
+        alert(`Error: ${data.message || "Failed to load risks"}`);
+      }
+    } catch (error) {
+      console.error("Error fetching risk details:", error);
+      alert("Failed to load risk details. Please try again.");
+    } finally {
+      setIsLoadingRisk(false);
+    }
+  };
+
+  const closeRiskModal = () => {
+    setSelectedRisk(null);
+  };
+
   const getStatusBadge = (status: string) => {
     const statusColors = {
       "Active": "#28a745",
@@ -183,6 +295,14 @@ export const ControlLibrary: React.FC<ControlLibraryProps> = ({ onClose }) => {
           </button>
         </div>
 
+        {isLoadingRisk && (
+          <div className="risk-loading-overlay">
+            <div className="risk-loading-spinner">Loading risk details...</div>
+          </div>
+        )}
+
+        {selectedRisk && <RiskDetailModal risk={selectedRisk} onClose={closeRiskModal} />}
+
         <div className="control-library-filters">
           <div className="search-container">
             <input
@@ -241,8 +361,9 @@ export const ControlLibrary: React.FC<ControlLibraryProps> = ({ onClose }) => {
                     </th>
                     <th>Description</th>
                     <th>Objective</th>
-                    <th 
-                      className="sortable" 
+                    <th>Linked Risks</th>
+                    <th
+                      className="sortable"
                       onClick={() => handleSort("status")}
                     >
                       Status {sortBy === "status" && (sortOrder === "asc" ? "↑" : "↓")}
@@ -302,6 +423,22 @@ export const ControlLibrary: React.FC<ControlLibraryProps> = ({ onClose }) => {
                         <td>
                           <div className="clamp tooltip cell-obj" title={control.objective}>
                             {control.objective}
+                          </div>
+                        </td>
+                        <td>
+                          <div className="clamp tooltip cell-linked-risks">
+                            {control.linked_risk_ids && control.linked_risk_ids.length > 0 ? (
+                              <div className="risk-links">
+                                {control.linked_risk_ids.map((riskId, i) => (
+                                  <span key={i} className="risk-id-link" onClick={() => fetchRiskDetails(riskId)}>
+                                    {riskId}
+                                    {i < (control.linked_risk_ids?.length || 0) - 1 ? ", " : ""}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              "-"
+                            )}
                           </div>
                         </td>
                         <td>

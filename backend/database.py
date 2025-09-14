@@ -1412,7 +1412,7 @@ class ControlDatabaseService:
                     control_description=doc["control_description"],
                     objective=doc["objective"],
                     annexA_map=[AnnexAMapping(**mapping) for mapping in doc.get("annexA_map", [])],
-                    linked_risk_ids=[],  # Will be populated by actual risk objects in link function
+                    linked_risk_ids=doc.get("linked_risk_ids", []),
                     owner_role=doc["owner_role"],
                     process_steps=doc.get("process_steps", []),
                     evidence_samples=doc.get("evidence_samples", []),

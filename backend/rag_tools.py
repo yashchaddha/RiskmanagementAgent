@@ -164,6 +164,8 @@ def semantic_risk_search(query: str, user_id: str, top_k: int = 5) -> dict:
             "target_date", "risk_progress", "residual_exposure", "risk_text"
         ]
         expr = f"user_id == '{user_id}'"
+
+        print(f"🔍 semantic_risk_search: query='{query}', user_id='{user_id}', top_k={top_k}")
         results = client.search(
             collection_name="finalized_risks_index",
             data=[query_vec],
@@ -205,6 +207,9 @@ def semantic_risk_search(query: str, user_id: str, top_k: int = 5) -> dict:
                     "risk_text": entity.get("risk_text"),
                 })
 
+        print(f"🔍 semantic_risk_search found {len(hits)} hits")
+        print(f"🔍 Returning hits: {hits}")
+
         return {
             "hits": hits,
             "count": len(hits),
@@ -215,79 +220,195 @@ def semantic_risk_search(query: str, user_id: str, top_k: int = 5) -> dict:
     except Exception as e:
         return {"hits": [], "count": 0, "error": str(e), "query": query, "user_id": user_id}
 
-
 @tool("semantic_control_search")
-def semantic_control_search(query: str, user_id: str, top_k: int = 5) -> dict:
+def semantic_control_search(query: str, user_id: str, annex_filter: Optional[str] = None, linked_risk_ids: Optional[str] = None, top_k: int = 5) -> dict:
     """
-    Semantically search the user's controls stored in Zilliz/Milvus.
-    Returns a JSON payload of the top matches (with scores) filtered by user_id.
-
-    Args:
-        query: Free-text user query about controls.
-        user_id: Tenant scoping (strictly filter to this user).
-        top_k: Number of results to return.
+    Return ONLY lightweight metadata for the best-matching controls.
+    Schema:
+      {
+        "query": str,
+        "user_id": str,
+        "count": int,
+        "hits": [
+          {
+            "control_id": str,
+            "title": str,
+            "summary": str,     # <= 200 chars
+            "score": float
+          }
+        ]
+      }
     """
     try:
         emb = OpenAIEmbeddings(model="text-embedding-3-small")
-        query_vec: List[float] = emb.embed_query(query)
+        qv: List[float] = emb.embed_query(query)
+
         client = MilvusClient(
             uri=os.getenv("ZILLIZ_URI"),
             token=os.getenv("ZILLIZ_TOKEN"),
             secure=True
         )
-
+        filter_exp = f"user_id == '{user_id}'"
+        if annex_filter and annex_filter.strip():
+            filter_exp += f" && annexa_mappings like '%{annex_filter.strip()}%'"
+        if linked_risk_ids and linked_risk_ids.strip():
+            filter_exp += f" && linked_risk_ids like '%{linked_risk_ids.strip()}%'"
+        # Only fetch tiny fields needed to build a short summary
         OUTPUT_FIELDS = [
-            "control_id", "control_title", "control_description", "objective", "annexa_mappings", "linked_risk_ids", "owner_role", "process_steps", "evidence_samples", "metrics", "frequency", "policy_ref", "status", "rationale", "assumptions", "control_text", "user_id", "created_at", "updated_at"
+            "control_id", "control_title", "control_description", "objective", "user_id", "control_text"
         ]
 
-        results = client.search(
+        print(f"🔍 semantic_control_search: query='{query}', user_id='{user_id}', annex_filter='{annex_filter}', linked_risk_ids='{linked_risk_ids}', top_k={top_k}")
+
+        res = client.search(
             collection_name="finalized_controls_index",
-            data=[query_vec],
+            data=[qv],
             anns_field="embedding",
-            limit=top_k,
+            limit=min(top_k, 8),
             output_fields=OUTPUT_FIELDS,
-            filter=f"user_id == '{user_id}'"
+            filter=filter_exp
         )
 
         hits: List[Dict[str, Any]] = []
-        if results and len(results) > 0:
-            for hit in results[0]:
+        if res and len(res) > 0:
+            for hit in res[0]:
                 entity = hit.get("entity", {}) if isinstance(hit, dict) else getattr(hit, "entity", {})
                 score = hit.get("score", None) if isinstance(hit, dict) else getattr(hit, "score", None)
                 try:
                     score = float(score) if score is not None else None
                 except Exception:
                     pass
-
                 hits.append({
                     "control_id": entity.get("control_id"),
-                    "control_title": entity.get("control_title"),
-                    "control_description": entity.get("control_description"),
-                    "objective": entity.get("objective"),
-                    "annexa_mappings": entity.get("annexa_mappings"),
-                    "linked_risk_ids": entity.get("linked_risk_ids"),
-                    "owner_role": entity.get("owner_role"),
-                    "process_steps": entity.get("process_steps"),
-                    "evidence_samples": entity.get("evidence_samples"),
-                    "metrics": entity.get("metrics"),
-                    "frequency": entity.get("frequency"),
-                    "policy_ref": entity.get("policy_ref"),
-                    "status": entity.get("status"),
-                    "rationale": entity.get("rationale"),
-                    "assumptions": entity.get("assumptions"),
-                    "control_text": entity.get("control_text"),
-                    "user_id": entity.get("user_id"),
-                    "created_at": entity.get("created_at"),
-                    "updated_at": entity.get("updated_at"),
-                    "similarity_score": score
+                    "title": entity.get("control_title"),
+                    "summary": entity.get("control_text"),
+                    "score": score
                 })
-
-        return {
-            "hits": hits,
-            "count": len(hits),
-            "query": query,
-            "user_id": user_id
-        }
-
+        print(f"🔍 semantic_control_search found {len(hits)} hits")
+        print(f"🔍 Returning hits: {hits}")
+        return {"hits": hits, "count": len(hits), "query": query, "user_id": user_id}
     except Exception as e:
         return {"hits": [], "count": 0, "error": str(e), "query": query, "user_id": user_id}
+
+
+@tool("fetch_controls_by_id")
+def fetch_controls_by_id(query: str, user_id: str, linked_risk_ids: Optional[str] = None, top_k: int = 2) -> dict:
+    """
+    Return ONLY lightweight metadata for the best-matching controls.
+    Schema:
+      {
+        "query": str,
+        "user_id": str,
+        "count": int,
+        "hits": [
+          {
+            "control_id": str,
+            "title": str,
+            "summary": str,     # <= 200 chars
+            "score": float
+          }
+        ]
+      }
+    """
+    try:
+        emb = OpenAIEmbeddings(model="text-embedding-3-small")
+        qv: List[float] = emb.embed_query(query)
+
+        client = MilvusClient(
+            uri=os.getenv("ZILLIZ_URI"),
+            token=os.getenv("ZILLIZ_TOKEN"),
+            secure=True
+        )
+        filter_exp = f"user_id == '{user_id}'"
+        if linked_risk_ids and linked_risk_ids.strip():
+            filter_exp += f" && linked_risk_ids like '%{linked_risk_ids.strip()}%'"
+        # Only fetch tiny fields needed to build a short summary
+        OUTPUT_FIELDS = [
+            "control_id", "control_title", "control_description", "objective", "annexa_mappings", "linked_risk_ids", "owner_role", "process_steps", "evidence_samples", "metrics", "frequency", "policy_ref", "status", "rationale", "assumptions", "control_text", "user_id", "created_at", "updated_at"
+        ]
+
+        print(f"🔍 fetch_controls_by_id: query='{query}', user_id='{user_id}', linked_risk_ids='{linked_risk_ids}', top_k={top_k}")
+
+        res = client.search(
+            collection_name="finalized_controls_index",
+            data=[qv],
+            anns_field="embedding",
+            limit=min(top_k, 2),
+            output_fields=OUTPUT_FIELDS,
+            filter=filter_exp
+        )
+
+        hits: List[Dict[str, Any]] = []
+        if res and len(res) > 0:
+            for hit in res[0]:
+                entity = hit.get("entity", {}) if isinstance(hit, dict) else getattr(hit, "entity", {})
+                score = hit.get("score", None) if isinstance(hit, dict) else getattr(hit, "score", None)
+                try:
+                    score = float(score) if score is not None else None
+                except Exception:
+                    pass
+                hits.append({
+                    "control_id": entity.get("control_id"),
+                    "title": entity.get("control_title"),
+                    "summary": entity.get("control_text"),
+                    "score": score
+                })
+        print(f"🔍 semantic_control_search found {len(hits)} hits")
+        print(f"🔍 Returning hits: {hits}")
+        return {"hits": hits, "count": len(hits), "query": query, "user_id": user_id}
+    except Exception as e:
+        return {"hits": [], "count": 0, "error": str(e), "query": query, "user_id": user_id, "linked_risk_ids": linked_risk_ids}
+
+
+# @tool("fetch_controls_by_id")
+# def fetch_controls_by_id(query: str, user_id: str) -> dict:
+#     """
+#     Fetch small, display-ready records for a shortlist of controls.
+#     Only returns fields suitable for UI/answering (no embeddings).
+#     """
+#     try:
+
+#         client = MilvusClient(
+#             uri=os.getenv("ZILLIZ_URI"),
+#             token=os.getenv("ZILLIZ_TOKEN"),
+#             secure=True
+#         )
+
+#         # If you also keep Mongo as source of truth, read there by IDs.
+#         # If only Zilliz, issue a query (depends on your schema; below is pseudo):
+#         OUTPUT_FIELDS = [
+#             "control_id", "control_title", "control_description", "objective", "annexa_mappings", "linked_risk_ids", "owner_role", "process_steps", "evidence_samples", "metrics", "frequency", "policy_ref", "status", "rationale", "assumptions", "control_text", "user_id", "created_at", "updated_at"
+#         ]
+
+#         # Pseudo-impl: You might maintain a parallel KV store, or query Milvus by expr:
+#         expr = f"user_id == '{user_id}' && control_id in [{','.join([repr(i) for i in control_ids])}]"
+#         res = client.query(
+#             collection_name="finalized_controls_index",
+#             expr=expr,
+#             output_fields=OUTPUT_FIELDS
+#         )
+
+#         def clip(s: str, n: int = 500) -> str:
+#             if not s: return s
+#             s = s.strip().replace("\n", " ")
+#             return (s[:n] + "…") if len(s) > n else s
+
+#         controls = []
+#         for r in (res or []):
+#             controls.append({
+#                 "control_id": r.get("control_id"),
+#                 "title": clip(r.get("control_title"), 140),
+#                 "description": clip(r.get("control_description"), 600),
+#                 "objective": clip(r.get("objective"), 300),
+#                 "annex": r.get("annexa_mappings"),
+#                 "metrics": r.get("metrics"),
+#                 "frequency": r.get("frequency"),
+#                 "owner_role": r.get("owner_role"),
+#                 "policy_ref": r.get("policy_ref"),
+#                 "status": r.get("status"),
+#                 "evidence_samples": r.get("evidence_samples"),
+#             })
+
+#         return {"controls": controls, "count": len(controls), "user_id": user_id}
+#     except Exception as e:
+#         return {"controls": [], "count": 0, "error": str(e), "user_id": user_id}

@@ -216,7 +216,7 @@
 
 .controls-table {
   width: 100%;
-  min-width: 2200px;
+  min-width: 2800px;
   border-collapse: collapse;
   font-size: 0.9rem;
   table-layout: auto;
@@ -299,46 +299,46 @@
 
 /* Column minimum widths to improve readability */
 .cell-id {
-  min-width: 140px;
-}
-.cell-title {
-  min-width: 320px;
-}
-.cell-desc {
-  min-width: 520px;
-}
-.cell-obj {
-  min-width: 480px;
-}
-.cell-annex {
-  min-width: 360px;
-}
-.cell-owner {
   min-width: 180px;
 }
+.cell-title {
+  min-width: 400px;
+}
+.cell-desc {
+  min-width: 600px;
+}
+.cell-obj {
+  min-width: 550px;
+}
+.cell-annex {
+  min-width: 250px;
+}
+.cell-owner {
+  min-width: 200px;
+}
 .cell-steps {
-  min-width: 520px;
+  min-width: 400px;
 }
 .cell-evidence {
-  min-width: 520px;
+  min-width: 400px;
 }
 .cell-metrics {
-  min-width: 380px;
+  min-width: 300px;
 }
 .cell-frequency {
-  min-width: 160px;
+  min-width: 150px;
 }
 .cell-policy {
-  min-width: 260px;
+  min-width: 200px;
 }
 .cell-status {
-  min-width: 160px;
+  min-width: 150px;
 }
 .cell-rationale {
-  min-width: 420px;
+  min-width: 500px;
 }
 .cell-assumptions {
-  min-width: 420px;
+  min-width: 500px;
 }
 
 .list {
@@ -371,4 +371,77 @@
 .save-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* Editable field styles */
+.editable-field {
+  width: 100%;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 0.9rem;
+  font-family: inherit;
+  background: #fff;
+  transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+.editable-field:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.25);
+}
+
+.editable-field:hover {
+  border-color: #b6c2f0;
+}
+
+textarea.editable-field {
+  resize: vertical;
+  min-height: 40px;
+  line-height: 1.4;
+}
+
+select.editable-field {
+  cursor: pointer;
+}
+
+/* Specific input styling */
+.cell-title-input {
+  min-height: 48px;
+}
+
+.cell-desc-input {
+  min-height: 72px;
+}
+
+.cell-obj-input {
+  min-height: 48px;
+}
+
+.cell-annex-input {
+  min-height: 48px;
+}
+
+.cell-steps-input {
+  min-height: 48px;
+}
+
+.cell-evidence-input {
+  min-height: 48px;
+}
+
+.cell-metrics-input {
+  min-height: 48px;
+}
+
+.cell-rationale-input {
+  min-height: 48px;
+}
+
+.cell-assumptions-input {
+  min-height: 48px;
+}
+
+.cell-status-input {
+  height: 40px;
 }
