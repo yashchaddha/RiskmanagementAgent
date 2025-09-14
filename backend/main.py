@@ -4,7 +4,7 @@ from auth import router as auth_router, get_current_user
 from agent import run_agent
 from helper import get_finalized_risks_summary
 from database import RiskDatabaseService, RiskProfileDatabaseService, ControlDatabaseService
-from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisks, FinalizedRisksResponse, Control, ControlResponse, ControlsResponse, AnnexAMapping
+from models import FinalizedRisk, Risk, GeneratedRisks, RiskResponse, FinalizedRisks, FinalizedRisksResponse, Control, ControlResponse, ControlsResponse, AnnexAMapping
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
@@ -477,6 +477,7 @@ class SaveControlRequest(BaseModel):
     owner_role: str = ""
     process_steps: List[str] = []
     evidence_samples: List[str] = []
+    linked_risk_ids: List[str] = []
     metrics: List[str] = []
     frequency: str = ""
     policy_ref: str = ""
@@ -545,7 +546,7 @@ async def save_control(request: SaveControlRequest, current_user=Depends(get_cur
             control_description=request.control_description,
             objective=request.objective,
             annexA_map=request.annexA_map,
-            linked_risk_ids=[],  # Empty initially, can be linked later
+            linked_risk_ids=request.linked_risk_ids,
             owner_role=request.owner_role,
             process_steps=request.process_steps,
             evidence_samples=request.evidence_samples,
@@ -583,7 +584,7 @@ async def bulk_save_controls(request: SaveControlsBulkRequest, current_user=Depe
                     control_description=item.control_description,
                     objective=item.objective,
                     annexA_map=item.annexA_map,
-                    linked_risk_ids=[],
+                    linked_risk_ids=item.linked_risk_ids,
                     owner_role=item.owner_role,
                     process_steps=item.process_steps,
                     evidence_samples=item.evidence_samples,

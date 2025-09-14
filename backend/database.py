@@ -1327,7 +1327,7 @@ class ControlDatabaseService:
                 control_description=inserted_doc["control_description"],
                 objective=inserted_doc["objective"],
                 annexA_map=[AnnexAMapping(**mapping) for mapping in inserted_doc["annexA_map"]],
-                linked_risk_ids=[],  # Will be populated by actual risk objects in link function
+                linked_risk_ids=inserted_doc["linked_risk_ids"],  # Will be populated by actual FinalizedRisk objects in link function
                 owner_role=inserted_doc["owner_role"],
                 process_steps=inserted_doc["process_steps"],
                 evidence_samples=inserted_doc["evidence_samples"],

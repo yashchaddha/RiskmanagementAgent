@@ -104,7 +104,7 @@ class Control(BaseModel):
     control_description: str
     objective: str
     annexA_map: List[AnnexAMapping]
-    linked_risk_ids: List[FinalizedRisk]
+    linked_risk_ids: List[str]
     owner_role: str
     process_steps: List[str]
     evidence_samples: List[str]

@@ -11,6 +11,7 @@ from agents.control_agent import control_node, control_generate_node, control_li
 from langgraph.prebuilt import create_react_agent
 from langsmith import traceable
 from rag_tools import knowledge_base_search
+from prompt_utils import load_prompt
 
 # Load environment variables from .env
 load_dotenv()
@@ -51,17 +52,7 @@ def orchestrator_node(state: LLMState) -> LLMState:
             routing_decision = "risk_node"
         else:
             # Use LLM for edge cases
-            system_prompt = """
-You are a routing classifier. First understand the context of the user, query and past conversation and accordingly Output EXACTLY ONE token from: {knowledge_node, risk_node, control_node, audit_facilitator}
-
-Rules:
-- audit_facilitator: audit processes, audit findings, audit documentation
-- risk_node: risk management, risk register, risk matrices, risk generation
-- control_node: security controls, control generation, control library, control implementation, Annex A controls
-- knowledge_node: ISO 27001 clauses, information security standards, compliance guidance (not controls)
-
-Output only the single token, no other text.
-"""
+            system_prompt = load_prompt("orchestrator_router.txt")
             
             try:
                 response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
@@ -180,44 +171,7 @@ def knowledge_node(state: LLMState):
 
         model = get_llm()
 
-        system_prompt = """
-You are an ISO/IEC 27001:2022 assistant specializing in information security management systems.
-
-TOOL USE:
-- For ANY question about ISO 27001:2022 clauses, subclauses, Annex A controls, or related information security topics, call the `knowledge_base_search` tool.
-- Use these parameters:
-  - query: reformulate the user's question for effective search
-  - category: "clauses" (for clauses/subclauses), "annex_a" (for controls), or "all" (general search)
-  - top_k: 3-5 results (default 5)
-
-RESPONSE STRATEGY:
-1) **Specific queries** (e.g., "Clause 5.2", "A.8.24"):
-   - Call tool with exact query and appropriate category
-   - Present the specific clause/control information clearly
-   - Include parent context when relevant
-
-2) **General queries** (e.g., "leadership requirements", "cryptographic controls"):
-   - Call tool with broader search terms
-   - Synthesize information from multiple results
-   - Provide comprehensive answers
-
-3) **Unrelated queries**:
-   - Don't call the tool
-   - Politely redirect to ISO 27001 topics
-
-AFTER TOOL RESULTS:
-- Read the search results and provide accurate, helpful responses
-- For specific clauses/controls: present the exact information found
-- For general topics: synthesize multiple results into coherent answers
-- If no relevant results: acknowledge and suggest alternative search terms
-- NEVER invent information not found in the search results
-
-FORMATTING:
-- Use clear headings for clauses/controls (e.g., "**Clause 5.2: Information Security Policy**")
-- Include descriptions and context from search results
-- When presenting multiple items, use bullet points or numbered lists
-- Always cite the source (clause number, control ID, etc.)
-"""
+        system_prompt = load_prompt("knowledge_node_iso_assistant.txt")
 
         # Build conversation history
         messages = [SystemMessage(content=system_prompt)]

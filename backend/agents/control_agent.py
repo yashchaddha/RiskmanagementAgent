@@ -1,4 +1,5 @@
 import os
+import random
 from dotenv import load_dotenv
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
@@ -8,10 +9,12 @@ from rag_tools import semantic_risk_search, get_risk_profiles, knowledge_base_se
 from models import LLMState
 import json
 import uuid
+import time
 from langgraph.prebuilt import create_react_agent
 from langsmith import traceable
 from database import ControlDatabaseService, RiskDatabaseService
 import traceback
+from prompt_utils import load_prompt
 
 # Load environment variables from .env
 load_dotenv()
@@ -30,192 +33,9 @@ def control_node(state: LLMState) -> LLMState:
     user_input = state.get("input", "").strip()
     conversation_history = state.get("conversation_history", [])
     user_data = state.get("user_data", {})
-    
-    # Industry-standard prompt for control domain classification
-    system_prompt = """# Control Management Assistant - Sub-Domain Classification
 
-## Role
-You are a conversational classifier within the Control Management domain. Your job is to understand user intent and either route to the appropriate control sub-domain or ask clarifying questions.
-
-## Available Control Sub-Domains
-1. **generate_control**: Creating new security controls for risks or requirements
-2. **control_library**: Searching, viewing, and managing user's existing saved controls
-3. **control_knowledge**: Educational information about control types, frameworks, and concepts
-
-## Task
-Analyze the user's query and determine the most appropriate action using semantic understanding.
-
-## Decision Process
-1. **Intent Analysis**: What is the user trying to accomplish?
-   - **Creation/Generation**: "generate", "create", "develop", "design" controls
-   - **Personal Data Access**: "show MY", "list MY", "find MY", "search MY" controls  
-   - **Educational/Conceptual**: "what are", "explain", "tell me about", "how do" controls work
-
-2. **Confidence Assessment**: Rate confidence (0.0-1.0) in understanding intent
-
-3. **Action Decision**:
-   - Confidence >= 0.8: Route to sub-domain
-   - Confidence < 0.8: Ask clarifying questions
-
-## Output Format
-```json
-{
-  "action": "route" | "clarify",
-  "sub_domain": "generate_control" | "control_library" | "control_knowledge" | null,
-  "confidence": 0.0-1.0,
-  "reasoning": "Brief explanation of understanding",
-  "clarifying_question": "Question for user (only when action is 'clarify')",
-  "parameters": {
-    "mode": "all" | "category" | "risk_id" | "risk_description",
-    "risk_category": "string (if mode=category)",
-    "risk_id": "string (if mode=risk_id)",
-    "risk_description": "string (if mode=risk_description)"
-  }
-}
-```
-
-## Generation Mode Detection
-When routing to generate_control, analyze the user input to determine generation parameters:
-
-- **mode: "all"** - Generate controls for all user's risks
-  - "Generate controls for all my risks"
-  - "Create security controls for my organization"
-  
-- **mode: "category"** - Generate controls for specific risk category
-  - "Generate controls for financial risks" → risk_category: "Financial"
-  - "Create controls for cyber security risks" → risk_category: "Cyber Security"
-  - "I need controls for operational risks" → risk_category: "Operational"
-  
-- **mode: "risk_id"** - Generate controls for specific risk ID
-  - "Generate controls for risk R-001" → risk_id: "R-001"
-  - "Create controls for RISK-123" → risk_id: "RISK-123"
-  
-- **mode: "risk_description"** - Generate controls for described risk
-  - "Generate controls for data breach risk" → risk_description: "data breach risk"
-  - "Create controls for SQL injection vulnerability" → risk_description: "SQL injection vulnerability"
-
-## Common Risk Categories
-- Financial, Operational, Strategic, Compliance, Technology, Cyber Security, Data Privacy, 
-- Human Resources, Environmental, Legal, Reputational, Supply Chain
-
-## Classification Examples
-
-### Generation Intent (route to generate_control):
-- "Generate controls for financial risks" 
-  ```json
-  {
-    "action": "route",
-    "sub_domain": "generate_control",
-    "confidence": 0.9,
-    "reasoning": "Clear intent to generate controls for specific category",
-    "parameters": {"mode": "category", "risk_category": "Financial"}
-  }
-  ```
-
-- "Create controls for risk R-001"
-  ```json
-  {
-    "action": "route", 
-    "sub_domain": "generate_control",
-    "confidence": 0.95,
-    "reasoning": "Specific risk ID mentioned",
-    "parameters": {"mode": "risk_id", "risk_id": "R-001"}
-  }
-  ```
-
-- "I need controls for ransomware attacks"
-  ```json
-  {
-    "action": "route",
-    "sub_domain": "generate_control", 
-    "confidence": 0.85,
-    "reasoning": "Specific risk described",
-    "parameters": {"mode": "risk_description", "risk_description": "ransomware attacks"}
-  }
-  ```
-
-### Library Intent (route to control_library):
-- "Show me my existing controls"
-- "List controls I've saved" 
-- "Find controls for risk R-001"
-- "What controls do I have implemented?"
-- "Search my controls for encryption"
-- "Find controls related to A.9.2" (ISO 27001 Annex A reference)
-- "Show me controls for A.5.23"
-- "List my controls mapped to A.12.1"
-- "Search controls by annex reference"
-
-```json
-{
-  "action": "route",
-  "sub_domain": "control_library", 
-  "confidence": 0.9,
-  "reasoning": "User wants to search their saved controls for Annex A.9.2 references",
-  "parameters": {"annex_reference": "A.9.2"}
-}
-```
-
-### Knowledge Intent (route to control_knowledge):
-- "What are access controls?"
-- "Explain preventive vs detective controls"
-- "Tell me about NIST control framework"
-- "How do technical controls work?"
-- "What's the difference between administrative and physical controls?"
-- "How can I implement this control in my org?"
-- "How to implement regular health and safety audits?"
-- "What are the steps to deploy this control?"
-- "How do I operationalize control C-002?"
-- "Implementation guidance for infection control measures"
-
-```json
-{
-  "action": "route",
-  "sub_domain": "control_knowledge",
-  "confidence": 0.9,
-  "reasoning": "User asking for implementation guidance for a specific control",
-  "parameters": {"query_type": "implementation", "control_context": "health and safety audits"}
-}
-```
-
-### Clarification Examples:
-User: "I need help with controls"
-```json
-{
-  "action": "clarify",
-  "sub_domain": null,
-  "confidence": 0.3,
-  "reasoning": "Ambiguous - could be generation, library access, or educational need",
-  "clarifying_question": "I'm here to help with controls. Are you looking to: create new controls for specific risks, review controls you've already saved, or learn about different types of security controls?"
-}
-```
-
-User: "Show me controls for A.5.23"
-```json
-{
-  "action": "clarify", 
-  "sub_domain": null,
-  "confidence": 0.6,
-  "reasoning": "Could be asking for user's saved controls mapped to A.5.23 or general information about A.5.23 controls",
-  "clarifying_question": "For ISO 27001 A.5.23 controls - are you looking for controls you've created and saved that map to this annex, or do you want to learn about what A.5.23 covers in general?"
-}
-```
-
-## Key Semantic Patterns
-- **Personal Ownership Indicators**: "my", "our", "I have", "we created" → control_library
-- **Creation Language**: "generate", "create", "build", "develop", "design" → generate_control  
-- **Educational Language**: "what is", "explain", "how does", "tell me about" → control_knowledge
-- **Implementation Language**: "how can I implement", "how to deploy", "implementation steps", "operationalize", "how do I" → control_knowledge
-- **Search/Filter Language**: "show", "list", "find", "search" + context clues → library vs knowledge
-- **Annex A References**: "A.9.2", "A.5.23", "annex A" + search intent → control_library (NOT generate_control)
-- **Risk Categories**: "Financial", "Operational", "Cyber Security" + generate intent → generate_control
-- **Context References**: "this control", "that control", "the control we discussed" → use conversation context
-
-## Context Considerations
-- Use conversation history to understand previous context
-- Consider user's organizational role and needs
-- Reference prior work: "Based on the risks we identified earlier..."
-- Build understanding progressively through conversation
-"""
+    # Override from prompts folder if available
+    system_prompt = load_prompt("control_classifier.txt")
 
     try:
         response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
@@ -383,179 +203,6 @@ User: "Show me controls for A.5.23"
             "control_generation_requested": False  # Errors don't generate controls
         }
 
-@traceable(project_name=LANGSMITH_PROJECT_NAME, name="generate_control_node")
-def control_generate_node(state: LLMState) -> LLMState:
-    """
-    Generate controls using direct LLM calls with conversation history
-    """
-    print("Control Generate Node Activated")
-    
-    conversation_history = state.get("conversation_history", [])
-    user_data = state.get("user_data", {})
-    user_id = user_data.get("username") or user_data.get("user_id") or ""
-    params = state.get("control_parameters", {}) or {}
-    mode = params.get("mode", "all")
-
-    all_controls = []
-
-    try:
-        risks = []
-        # Build a small ReAct agent for risk lookup to avoid direct tool calls
-        model = get_llm()
-        def react_search_risks(query: str, uid: str, top_k: int = 5) -> list:
-            sys = (
-                "You retrieve risks to enable control generation. "
-                "Call the `semantic_risk_search` tool with the provided query, user_id, and top_k. "
-                "After the tool returns, output ONLY a compact JSON array of risks with fields: "
-                "[{'id','description','category','likelihood','impact','treatment_strategy'}]."
-            )
-            msgs = [SystemMessage(content=sys), HumanMessage(content=f"query={query}\nuser_id={uid}\ntop_k={top_k}")]
-            agent = create_react_agent(model=model, tools=[semantic_risk_search])
-            result = agent.invoke({"messages": msgs})
-            final = result.get("messages", [])[-1]
-            content = getattr(final, "content", getattr(final, "text", "")) or ""
-            try:
-                s = content.find('['); e = content.rfind(']')
-                if s != -1 and e != -1 and e > s:
-                    return json.loads(content[s:e+1])
-            except Exception:
-                pass
-            return []
-
-        if mode == "risk_id":
-            rid = params.get("risk_id", "")
-            if rid:
-                arr = react_search_risks(query=f"risk ID {rid}", uid=user_id, top_k=1)
-                if arr:
-                    r0 = arr[0]
-                    risks = [{
-                        "id": r0.get("id") or r0.get("risk_id", ""),
-                        "description": r0.get("description", ""),
-                        "category": r0.get("category", ""),
-                        "likelihood": r0.get("likelihood", "Medium"),
-                        "impact": r0.get("impact", "Medium"),
-                        "treatment_strategy": r0.get("treatment_strategy", ""),
-                        "user_id": user_id
-                    }]
-        elif mode == "risk_description":
-            # Be robust: pull from state or fallback to parameters
-            desc = (state.get("risk_description") or params.get("risk_description") or "").strip()
-            if desc:
-                arr = react_search_risks(query=desc, uid=user_id, top_k=1)
-                if arr:
-                    r0 = arr[0]
-                    risks = [{
-                        "id": r0.get("id") or r0.get("risk_id", ""),
-                        "description": r0.get("description", desc),
-                        "category": r0.get("category", "Technology"),
-                        "likelihood": r0.get("likelihood", "Medium"),
-                        "impact": r0.get("impact", "Medium"),
-                        "treatment_strategy": r0.get("treatment_strategy", ""),
-                        "user_id": user_id
-                    }]
-                else:
-                    risks = [{
-                        "id": "",
-                        "description": desc,
-                        "category": "Technology",
-                        "likelihood": "Medium",
-                        "impact": "Medium",
-                        "treatment_strategy": "",
-                        "user_id": user_id
-                    }]
-        elif mode == "category":
-            target_cat = (params.get("risk_category") or "").strip()
-            q = (target_cat + " risks mitigation") if target_cat else state.get("input", "relevant risks")
-            arr = react_search_risks(query=q, uid=user_id, top_k=20)
-            for h in arr:
-                hcat = str(h.get("category", ""))
-                if target_cat and hcat.lower() != target_cat.lower():
-                    continue
-                risks.append({
-                    "id": h.get("id") or h.get("risk_id", ""),
-                    "description": h.get("description", ""),
-                    "category": hcat,
-                    "likelihood": h.get("likelihood", "Medium"),
-                    "impact": h.get("impact", "Medium"),
-                    "treatment_strategy": h.get("treatment_strategy", ""),
-                    "user_id": user_id,
-                })
-            if not risks:
-                # Fall back to searching all risks in the category using agent
-                fallback_q = f"{target_cat} category risks" if target_cat else "all risks"
-                arr2 = react_search_risks(query=fallback_q, uid=user_id, top_k=20)
-                for h in arr2:
-                    hcat2 = str(h.get("category", ""))
-                    if not target_cat or hcat2.lower() == target_cat.lower():
-                        risks.append({
-                            "id": h.get("id") or h.get("risk_id", ""),
-                            "description": h.get("description", ""),
-                            "category": hcat2,
-                            "likelihood": h.get("likelihood", "Medium"),
-                            "impact": h.get("impact", "Medium"),
-                            "treatment_strategy": h.get("treatment_strategy", ""),
-                            "user_id": user_id,
-                        })
-        else:
-            arr3 = react_search_risks(query="all risks security controls mitigation", uid=user_id, top_k=20)
-            for h in arr3:
-                risks.append({
-                    "id": h.get("id") or h.get("risk_id", ""),
-                    "description": h.get("description", ""),
-                    "category": h.get("category", ""),
-                    "likelihood": h.get("likelihood", "Medium"),
-                    "impact": h.get("impact", "Medium"),
-                    "treatment_strategy": h.get("treatment_strategy", ""),
-                    "user_id": user_id
-                })
-            if not risks:
-                # Fall back to searching all user risks via agent
-                arr4 = react_search_risks(query="all user risks", uid=user_id, top_k=20)
-                for h in arr4:
-                    risks.append({
-                        "id": h.get("id") or h.get("risk_id", ""),
-                        "description": h.get("description", ""),
-                        "category": h.get("category", ""),
-                        "likelihood": h.get("likelihood", "Medium"),
-                        "impact": h.get("impact", "Medium"),
-                        "treatment_strategy": h.get("treatment_strategy", ""),
-                        "user_id": user_id
-                    })
-
-        print(f"DEBUG: control_generate_node - generating for {len(risks)} risk(s)")
-
-        for r in risks:
-            controls = generate_controls_for_risk(r, user_data, conversation_history)
-            link_risk = not (mode == "risk_description" and r.get("id", "") == "")
-            for c in controls:
-                if link_risk and r.get("id"):
-                    # Ensure linked_risk_ids is a list and add the risk ID
-                    if "linked_risk_ids" not in c:
-                        c["linked_risk_ids"] = []
-                    if r.get("id") not in c["linked_risk_ids"]:
-                        c["linked_risk_ids"].append(r.get("id"))
-                c["user_id"] = user_id
-                c["id"] = str(uuid.uuid4())
-            if controls:
-                # Do not save here; return to frontend for selection
-                all_controls.extend(controls)
-
-        # Return generated controls for popup; frontend will save selected ones
-        rc = state.get("risk_context", {}) or {}
-        rc["generated_controls"] = all_controls
-        state["risk_context"] = rc
-        state["generated_controls"] = all_controls
-        
-        # Flag remains True (set in control_node) to trigger frontend popup
-        state["output"] = (f"Generated {len(all_controls)} controls. "
-                            f"Please select controls to save via the control API.")
-        return state
-    except Exception as e:
-        # Reset flag on error
-        state["control_generation_requested"] = False
-        state["output"] = f"Error generating controls: {str(e)}"
-        return state
-
 @traceable(project_name=LANGSMITH_PROJECT_NAME, name="control_library_node")
 def control_library_node(state: LLMState) -> LLMState:
     """Conversational control library assistant for searching and managing user's controls"""
@@ -566,31 +213,7 @@ def control_library_node(state: LLMState) -> LLMState:
     conversation_history = state.get("conversation_history", [])
     user_id = user_data.get("username") or user_data.get("user_id") or ""
     model = get_llm()
-    
-    search_intent_prompt = f"""You are the Control Library assistant.
-
-Your job is to help the user search, list, filter, or sort internal controls **from their control library**.
-
-TOOL USE:
-- Controls are always mapped to Annexes and not clauses.
-- If user asks for controls related/mapped to a any annex (e.g., Annex A.8.30), you MUST call the tool `knowledge_base_search` and then call the `semantic_control_search` tool to get the relevant controls.
-- If the user asks to **find/search/list/filter/sort** controls, you MUST call the tool `semantic_control_search`.
-- Always include:
-  - query: a concise reformulation of the user's ask (defaults to the user's latest message if unspecified)
-  - user_id: "{user_id}" (use this value when missing - (not required for knowledge_base_search))
-  - top_k: choose 5–10 based on query breadth (default 5)
-
-AFTER THE TOOL RETURNS:
-- Read the tool results and produce a clear, helpful natural-language response.
-- Summarize what was found and why it matches.
-- If results exist, present 3–5 best hits with key fields (e.g., control title, description, owner) in a readable format.
-- If no results, suggest alternative terms/broader queries.
-- Do NOT dump raw JSON.
-
-IF NO SEARCH IS REQUESTED:
-- If the user only says things like "open my control library", do NOT call the tool.
-- Briefly confirm it's open and explain how to ask search queries (e.g., “find controls related to cybersecurity”).
-"""
+    search_intent_prompt = load_prompt("control_library_assistant.txt", {"user_id": user_id})
 
     try:
         messages = [SystemMessage(content=search_intent_prompt)]
@@ -602,11 +225,28 @@ IF NO SEARCH IS REQUESTED:
                 messages.append(AIMessage(content=ex["assistant"]))
 
         messages.append(HumanMessage(content=user_input))
+        # Create ReAct agent with all required tools
         agent = create_react_agent(
             model=model,
-            tools=[semantic_control_search],
+            tools=[semantic_control_search, knowledge_base_search, semantic_risk_search]
         )
+
+        # Track tool calls
+        tool_calls = []
         result = agent.invoke({"messages": messages})
+        
+        # Extract tool calls from the result
+        for message in result.get("messages", []):
+            if hasattr(message, "tool_calls") and message.tool_calls:
+                tool_calls.extend(message.tool_calls)
+            elif isinstance(message, ToolMessage):
+                tool_calls.append(message)
+        
+        # Print tool calls for debugging
+        for tool_call in tool_calls:
+            print(f"Tool Call: {tool_call}")
+        
+        # Get the final result
         final_text = ""
         try:
             msgs = result.get("messages", [])
@@ -666,54 +306,16 @@ def control_knowledge_node(state: LLMState) -> LLMState:
         control_parameters = state.get("control_parameters", {})
 
         model = get_llm()
-        system_prompt = """
-You are a **Internal Controls Knowledge Specialist** with deep expertise in internal controls management.  
-Your role is to answer user questions about controls, their organization's internal controls, and provide actionable insights.  
-Be conversational, helpful, and concise — ask clarifying questions when user input is vague.
+        system_prompt = load_prompt(
+            "control_knowledge_specialist.txt",
+            {
+                "user_id": user_data.get("username") or user_data.get("user_id") or "",
+                "user_organization": user_organization,
+                "user_location": user_location,
+                "user_domain": user_domain,
+            },
+        )
 
----
-
-### USER CONTEXT
-Current User ID: "{user_id}"
-Organization: {user_organization}
-Location: {user_location}
-Domain: {user_domain}
-
----
-
-### AVAILABLE TOOLS
-
-1. **semantic_control_search**  
-   Use this when users want:  
-   - To find/search specific controls from their control library  
-   - To filter controls by annexes, categories, or other attributes  
-   - To view specific thematic controls (e.g., cybersecurity, compliance)  
-
----
-
-### EXPERTISE
-You are capable of:
-- Explaining internal controls of the organization and categories  
-- Analyzing and interpreting control libraries  
-- Giving practical recommendations and control implementation strategies  
-- Explaining control effectiveness and performance metrics  
-
----
-
-### RESPONSE STRATEGY
-
-1. **Be Context-Aware:**  
-   - Use the organization, location, and domain provided.  
-   - If unclear, politely ask for clarification (e.g., "Do you want me to search your control library or explain your specific controls?").  
-
-2. **Provide Actionable Insights:**  
-   - After using tools, summarize results in plain language.  
-   - Add interpretation, highlight important risks, and suggest next steps where relevant.  
-
-3. **Stay Conversational:**  
-   - Keep responses user-friendly, avoid dumping raw JSON unless specifically requested.  
-   - You may format results in a clean, structured way (bullet points, tables).  
-"""
         messages = [SystemMessage(content=system_prompt)]
         recent = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
         for ex in recent:
@@ -743,142 +345,181 @@ You are capable of:
             "control_generation_requested": False  # Reset flag on error
         }
 
-def generate_controls_for_risk(risk_data: dict, user_context: dict, conversation_history: list) -> list:
-    """Generate controls for a single risk using direct LLM call"""
-    print(f"DEBUG: Entering generate_controls_for_risk for risk: {risk_data.get('description', 'No description')[:50]}...")
+
+@traceable(project_name=LANGSMITH_PROJECT_NAME, name="control_generate_node")
+def control_generate_node(state: LLMState) -> LLMState:
+    """
+    Control generation node.
+    1. From the user input, determine the risk source (direct description vs search user's risk register).
+    2. If user has given the description directly get the description and generate controls for it.
+    3. If user wants to search their risk register, call the RAG tool semantic_risk_search to find relevant risks.
+    4. Then for the identified risks, generate controls for them.
+    5. Map the generated controls to ISO 27001 Annex A by calling knowledge_base_search.
+    6. Return the generated controls as JSON and update the state.
+    """
+
+    print("Control Generate Node Activated")
+    conversation_history = state.get("conversation_history", [])
+    user_data = state.get("user_data", {})
+    user_id = user_data.get("username")
+    user_input = state.get("input", "").strip()
+    user_organization = user_data.get("organization_name", "Unknown").strip()
+    user_location = user_data.get("location", "Unknown").strip()
+    user_domain = user_data.get("domain", "Unknown").strip()
+
+    model = get_llm()
+    system_prompt = f"""
+    You are a control generation specialist assisting users in creating ISO 27001 controls.
+    Your task is to generate relevant and effective controls based on the user's risk context and organizational details.
+    You have access to the following tools:
+    1. semantic_risk_search: Search the user's risk register to find relevant risks based on a query.
+    2. knowledge_base_search: Search an ISO 27001 knowledge base to find relevant control information.
+
+    USER CONTEXT:
+    - User ID: {user_id}
+    - Organization: {user_organization}
+    - Location: {user_location}
+    - Domain: {user_domain}
+
+    Follow the PROCESS below to generate controls:
+    PROCESS:
+    1. Analyze the user's input and recent conversation history to understand their needs.
+    2. Determine if the user has provided a direct risk description or wants to search their risk register.
+       - If they want to search their register, use semantic_risk_search to find relevant risks.
+       - If a direct description is provided, do not call semantic_risk_search, directly generate controls for the given risk with linked_risk_ids: [] i.e. no risk id needed as the user has provided a description.
+    3. For each risk, generate controls that address the risk effectively.
+    4. Use knowledge_base_search to find relevant ISO 27001 control information to map the generated controls to Annex A.
+    5. Compile the generated controls into a JSON array with the following fields:    
+        1. control_title: Clear, specific control title
+        2. control_description: Detailed description of what this control addresses for this risk
+        3. objective: Business objective and purpose of the control
+        4. annexA_map: Array of relevant ISO 27001:2022 Annex A mappings with id and title
+        5. linked_risk_ids: Array containing the risk ID this control addresses
+        6. owner_role: Suggested role responsible for this control (e.g., "CISO", "IT Manager", "Security Officer")
+        7. process_steps: Array of 3-5 specific implementation steps
+        8. evidence_samples: Array of 3-5 examples of evidence/documentation for this control
+        9. metrics: Array of 2-4 measurable KPIs or metrics to track control effectiveness
+        10. frequency: How often the control is executed/reviewed (e.g., "Quarterly", "Monthly", "Annually")
+        11. policy_ref: Reference to related organizational policy
+        12. status: Set to "Planned" for new controls
+        13. rationale: Why this control is necessary for mitigating the specific risk
+        14. assumptions: Any assumptions made (can be empty string if none)
+    6. Ensure the ISO 27001 Annex A mappings are accurate and relevant.
+    7. Return the generated controls and the response text as STRICTLY JSON ONLY. No additional text. If no controls can be generated, return response_to_user with an explanation but still return valid JSON with an empty controls array. and follow the RESPONSE FORMAT below.
+
+JSON RESPONSE FORMAT:
+{{
+  "response_to_user": "...",
+  "controls": [
+    {{
+      "control_title": "...",
+      "control_description": "...",
+      "objective": "...",
+      "annexA_map": [
+        {{"id": "A.X.Y", "title": "..."}}
+      ],
+      "linked_risk_ids": [],
+      "owner_role": "...",
+      "process_steps": [
+        "Step 1...",
+        "Step 2..."
+      ],
+      "evidence_samples": [
+        "Document 1...",
+        "Report 2..."
+      ],
+      "metrics": [
+        "Metric 1...",
+        "Metric 2..."
+      ],
+      "frequency": "...",
+      "policy_ref": "...",
+      "status": "Planned",
+      "rationale": "...",
+      "assumptions": ""
+    }}
+  ]
+}}
+"""
+
     try:
-        # Create comprehensive context for control generation
-        risk_context = f"""
-Risk Details:
-- ID: {risk_data.get('id', 'N/A')}
-- Description: {risk_data.get('description', '')}
-- Category: {risk_data.get('category', '')}
-- Impact: {risk_data.get('impact', '')}
-- Likelihood: {risk_data.get('likelihood', '')}
-- Treatment Strategy: {risk_data.get('treatment_strategy', '')}
-- Department: {risk_data.get('department', '')}
-- Risk Owner: {risk_data.get('risk_owner', '')}
+        print(f"control_generate_node: user_id={user_id}, input_len={len(user_input)}")
+        messages = [SystemMessage(content=system_prompt)]
+        recent_history = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
+        for ex in recent_history:
+            if ex.get("user"):
+                messages.append(HumanMessage(content=ex["user"]))
+            if ex.get("assistant"):
+                messages.append(AIMessage(content=ex["assistant"]))
 
-Organization Context:
-- Organization: {user_context.get('organization_name', '')}
-- Domain: {user_context.get('domain', '')}
-- Location: {user_context.get('location', '')}
-"""
+        messages.append(HumanMessage(content=user_input))
+
+        agent = create_react_agent(
+            model=model,
+            tools=[semantic_risk_search, knowledge_base_search],
+        )
+        result = agent.invoke({"messages": messages})
+        # Extract final assistant content
+        # get the tool calls for debugging
+        tool_calls = []
+        for message in result.get("messages", []):
+            if hasattr(message, "tool_calls") and message.tool_calls:
+                tool_calls.extend(message.tool_calls)
+            elif isinstance(message, ToolMessage):
+                tool_calls.append(message)
         
-        # Search for relevant ISO 27001 knowledge for this risk
-        risk_query = f"ISO 27001 controls for {risk_data.get('category', '')} {risk_data.get('description', '')[:100]}"
-        iso_search_results = knowledge_base_search.invoke({"query": risk_query, "category": "all", "top_k": 5})
-        iso_knowledge_context = ""
-        if iso_search_results.get("hits"):
-            for hit in iso_search_results["hits"]:
-                iso_knowledge_context += f"- {hit.get('text', '')}\n"
-        print(f"DEBUG: Retrieved {len(iso_search_results.get('hits', []))} ISO knowledge entries")
+        # Print tool calls for debugging
+        for tool_call in tool_calls:
+            print(f"Tool Call: {tool_call}")
+
+        final_msg = result["messages"][-1]
+        response_content = getattr(final_msg, "content", getattr(final_msg, "text", "")) or ""
         
-        system_prompt = f"""
-You are an ISO 27001:2022 Controls Specialist. Based on the risk provided, generate 3-5 specific, actionable ISO 27001:2022 Annex A controls in the comprehensive format.
-
-Relevant ISO 27001:2022 Knowledge Base entries for this risk:
-{iso_knowledge_context}
-
-# Use the above knowledge entries as guidance for appropriate Annex A mappings and control design.
-# Only reference Annex A controls that are relevant to the specific risk being addressed.
-
-Risk Context:
-{risk_context}
-
-Your task is to analyze this risk and generate relevant controls that would effectively mitigate this specific risk.
-
-For each control, provide a comprehensive structure with:
-1. control_id: Unique identifier (format: C-[NUMBER], e.g., "C-001", "C-002")
-2. control_title: Clear, specific control title
-3. control_description: Detailed description of what this control addresses for this risk
-4. objective: Business objective and purpose of the control
-5. annexA_map: Array of relevant ISO 27001:2022 Annex A mappings with id and title
-6. linked_risk_ids: Array containing the risk ID this control addresses
-7. owner_role: Suggested role responsible for this control (e.g., "CISO", "IT Manager", "Security Officer")
-8. process_steps: Array of 3-5 specific implementation steps
-9. evidence_samples: Array of 3-5 examples of evidence/documentation for this control
-10. metrics: Array of 2-4 measurable KPIs or metrics to track control effectiveness
-11. frequency: How often the control is executed/reviewed (e.g., "Quarterly", "Monthly", "Annually")
-12. policy_ref: Reference to related organizational policy
-13. status: Set to "Planned" for new controls
-14. rationale: Why this control is necessary for mitigating the specific risk
-15. assumptions: Any assumptions made (can be empty string if none)
-
-REQUIREMENTS:
-- Controls must be specifically relevant to the risk described
-- Use appropriate ISO 27001:2022 Annex A references from the knowledge base
-- Make controls actionable and specific to the organization context
-- Ensure process_steps are concrete and implementable
-- Evidence_samples should be realistic audit artifacts
-- Metrics should be measurable and relevant to the control objective
-- Consider the department and risk owner in the owner_role assignment
-
-Return ONLY a valid JSON array of controls in this format:
-[
-  {{
-    "control_id": "C-001",
-    "control_title": "...",
-    "control_description": "...",
-    "objective": "...",
-    "annexA_map": [
-      {{"id": "A.X.Y", "title": "..."}}
-    ],
-    "linked_risk_ids": ["{risk_data.get('id', 'RISK-001')}"],
-    "owner_role": "...",
-    "process_steps": [
-      "Step 1...",
-      "Step 2..."
-    ],
-    "evidence_samples": [
-      "Document 1...",
-      "Report 2..."
-    ],
-    "metrics": [
-      "Metric 1...",
-      "Metric 2..."
-    ],
-    "frequency": "...",
-    "policy_ref": "...",
-    "status": "Planned",
-    "rationale": "...",
-    "assumptions": ""
-  }}
-]
-
-Do not include any explanatory text, only the JSON array.
-"""
-
-        user_input = f"Generate ISO 27001 controls for the risk: {risk_data.get('description', '')}"
-        print(f"DEBUG: Making LLM call with user_input: {user_input[:100]}...")
-        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
-        print(f"DEBUG: LLM response length: {len(response_content)}")
-        print(f"DEBUG: LLM response preview: {response_content[:200]}...")
+        print(f"LLM Response received: {response_content[:100]}...")
         
-        # Parse JSON response
+        # Update conversation history
+        updated_history = conversation_history + [
+            {"user": user_input, "assistant": response_content}
+        ]
+
+        # add a control_id to each control in the format - CONTROL-<6 digit random number>
         content = response_content.strip()
-        if content.startswith("```") and content.endswith("```"):
-            content = content.strip('`').strip()
-            if content.startswith('json'):
-                content = content[4:].strip()
+        if content.startswith("```json") and content.endswith("```"):
+            content = content[7:-3].strip()
+        elif content.startswith("```") and content.endswith("```"):
+            content = content[3:-3].strip()
+        print(f"Raw response content extracted: {content}")
+
+        try:
+            output = json.loads(content)
+            controls = output.get("controls", [])
+            response_to_user = output.get("response_to_user", "")
+            for control in controls:
+                control["control_id"] = f"CONTROL-{random.randint(100000, 999999)}"
+            print(f"Parsed controls with IDs: {controls}")
+        except json.JSONDecodeError:
+            print("Failed to parse JSON from response content")
+            state["control_generation_requested"] = False
+            state["output"] = response_to_user or "I couldn't generate controls based on the provided information. Please try rephrasing or providing more details."
+            return state
+        except Exception as e:
+            print(f"Unexpected error parsing controls: {e}")
+            state["control_generation_requested"] = False
+            state["output"] = response_to_user or "I couldn't generate controls based on the provided information. Please try rephrasing or providing more details."
+            return state
         
-        # Extract JSON array
-        start = content.find('[')
-        end = content.rfind(']')
-        print(f"DEBUG: JSON array bounds: start={start}, end={end}")
-        if start != -1 and end != -1 and end > start:
-            controls_json = content[start:end+1]
-            print(f"DEBUG: Extracted JSON: {controls_json[:200]}...")
-            controls = json.loads(controls_json)
-            print(f"DEBUG: Parsed {len(controls) if isinstance(controls, list) else 0} controls from JSON")
-            return controls if isinstance(controls, list) else []
-        
-        print("DEBUG: No valid JSON array found in response")
-        return []
-        
-    except json.JSONDecodeError as e:
-        print(f"JSON decode error in control generation: {e}")
-        return []
+        state["risk_context"] = state.get("risk_context", {}) or {}
+        state["risk_context"]["generated_controls"] = controls
+        state["generated_controls"] = controls
+        print(f"control_generate_node: returning {len(controls)} controls")
+        state["output"] = response_to_user or f"I've generated {len(controls)} controls for you."
+        return {
+            **state,
+            "conversation_history": updated_history,
+            "control_generation_requested": False
+        }
     except Exception as e:
-        print(f"Error generating controls for risk: {e}")
-        return []
+        print(f"Error in control_generate_node: {str(e)}")
+        state["control_generation_requested"] = False
+        state["output"] = f"Error generating controls: {str(e)}"
+        return state

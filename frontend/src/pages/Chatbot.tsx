@@ -424,6 +424,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
           owner_role: c.owner_role || "",
           process_steps: c.process_steps || [],
           evidence_samples: c.evidence_samples || [],
+          linked_risk_ids: c.linked_risk_ids || [],
           metrics: c.metrics || [],
           frequency: c.frequency || "",
           policy_ref: c.policy_ref || "",
