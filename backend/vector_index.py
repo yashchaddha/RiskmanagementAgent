@@ -23,7 +23,7 @@ COLLECTION_VERSION = "v2"  # Increment when schema changes
 VERSIONED_COLLECTION_NAME = f"{COLLECTION_NAME}_{COLLECTION_VERSION}"
 
 # Controls collection constants
-CONTROLS_COLLECTION_NAME = "finalized_controls_index"
+CONTROLS_COLLECTION_NAME = "finalized_controls"
 CONTROLS_COLLECTION_VERSION = "v1"
 VERSIONED_CONTROLS_COLLECTION_NAME = f"{CONTROLS_COLLECTION_NAME}_{CONTROLS_COLLECTION_VERSION}"
 
@@ -115,15 +115,8 @@ def _ensure_controls_collection() -> Collection:
             FieldSchema(name="control_description", dtype=DataType.VARCHAR, max_length=8192),
             FieldSchema(name="objective", dtype=DataType.VARCHAR, max_length=8192),
             FieldSchema(name="owner_role", dtype=DataType.VARCHAR, max_length=128),
-            FieldSchema(name="frequency", dtype=DataType.VARCHAR, max_length=128),
-            FieldSchema(name="policy_ref", dtype=DataType.VARCHAR, max_length=512),
             FieldSchema(name="status", dtype=DataType.VARCHAR, max_length=128),
-            FieldSchema(name="rationale", dtype=DataType.VARCHAR, max_length=8192),
-            FieldSchema(name="assumptions", dtype=DataType.VARCHAR, max_length=8192),
             FieldSchema(name="annexa_mappings", dtype=DataType.VARCHAR, max_length=2048),
-            FieldSchema(name="process_steps", dtype=DataType.VARCHAR, max_length=8192),
-            FieldSchema(name="evidence_samples", dtype=DataType.VARCHAR, max_length=8192),
-            FieldSchema(name="metrics", dtype=DataType.VARCHAR, max_length=4096),
             FieldSchema(name="linked_risk_ids", dtype=DataType.VARCHAR, max_length=2048),
             FieldSchema(name="control_text", dtype=DataType.VARCHAR, max_length=8192),
             FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBED_DIM),
@@ -294,37 +287,18 @@ def _compose_control_sentence(
     def _v(x): 
         return str(x).strip() if (x is not None and str(x).strip() != "" and str(x).strip() != "None") else None
 
-    def _flatten_list(items, prefix=""):
-        """Helper to flatten list fields into readable text"""
-        if not items:
+    # Note: We intentionally limit to the approved fields only
+    def _annexa_readable(mappings_str: Optional[str]):
+        """Annex A mappings are stored as a single string; make it readable if present."""
+        s = _v(mappings_str)
+        if not s:
             return None
-        if isinstance(items, list):
-            clean_items = [str(item).strip() for item in items if item and str(item).strip()]
-            if clean_items:
-                return f"{prefix}{', '.join(clean_items)}" if prefix else ", ".join(clean_items)
-        return _v(items)
-
-    def _flatten_annexa_mappings(mappings):
-        """Convert AnnexA mappings to readable format"""
-        if not mappings:
-            return None
-        if isinstance(mappings, list):
-            formatted = []
-            for mapping in mappings:
-                if isinstance(mapping, dict):
-                    id_val = mapping.get("id", "")
-                    title = mapping.get("title", "")
-                    if id_val and title:
-                        formatted.append(f"{id_val} ({title})")
-                    elif id_val:
-                        formatted.append(str(id_val))
-            return f"ISO 27001: {', '.join(formatted)}" if formatted else None
-        return _v(mappings)
+        return f"ISO 27001 Annex A mappings: {s}"
 
     try:
         llm = get_llm()
 
-        # Prepare comprehensive control data payload with flattened arrays
+        # Prepare comprehensive control data payload with only allowed fields
         payload = {
             "organization_name": _v(organization_name),
             "location": _v(location),
@@ -334,16 +308,9 @@ def _compose_control_sentence(
             "control_description": _v(control.get("control_description")),
             "objective": _v(control.get("objective")),
             "owner_role": _v(control.get("owner_role")),
-            "frequency": _v(control.get("frequency")),
-            "policy_ref": _v(control.get("policy_ref")),
             "status": _v(control.get("status")),
-            "rationale": _v(control.get("rationale")),
-            "assumptions": _v(control.get("assumptions")),
-            "iso_mappings": _flatten_annexa_mappings(control.get("annexA_map")),
-            "process_steps": _flatten_list(control.get("process_steps"), "Process steps: "),
-            "evidence_samples": _flatten_list(control.get("evidence_samples"), "Evidence: "),
-            "metrics": _flatten_list(control.get("metrics"), "Metrics: "),
-            "linked_risks": _flatten_list(control.get("linked_risk_ids"), "Addresses risks: "),
+            "annexa_mappings": _v(control.get("annexa_mappings")),
+            "linked_risk_ids": _v(control.get("linked_risk_ids")),
         }
 
         # Filter out None values for cleaner prompt
@@ -368,7 +335,7 @@ Write only the paragraph, no other text or formatting:
 """
 
         resp = llm.invoke([
-            {"role": "system", "content": "You are a professional internal controls expert who writes comprehensive, searchable control descriptions. Create detailed paragraphs that capture all relevant control information in natural language."},
+            {"role": "system", "content": "You are a professional internal controls expert who writes comprehensive, searchable control descriptions. Create detailed paragraphs that capture all relevant control information in natural language. Only use the fields provided; do not invent details."},
             {"role": "user", "content": user_prompt}
         ])
         
@@ -386,7 +353,7 @@ Write only the paragraph, no other text or formatting:
         # Fallback to structured format if LLM fails
         pass
     
-    # Enhanced fallback format with all attributes
+    # Fallback format with only the allowed attributes
     parts = []
     if _v(organization_name):
         parts.append(f"{_v(organization_name)}")
@@ -401,38 +368,33 @@ Write only the paragraph, no other text or formatting:
     control_desc = _v(control.get("control_description"))
     objective = _v(control.get("objective"))
     
-    paragraph = f"{org_context} implements {control_title}: {control_desc}. This control aims to {objective.lower()}."
-    
-    # Add implementation details if available
-    details = []
-    if _v(control.get("owner_role")):
-        details.append(f"managed by {_v(control.get('owner_role'))}")
-    if _v(control.get("frequency")):
-        details.append(f"performed {_v(control.get('frequency')).lower()}")
-    if _v(control.get("status")):
-        details.append(f"currently {_v(control.get('status')).lower()}")
-    
-    # Add flattened array information
-    process_steps = _flatten_list(control.get("process_steps"))
-    if process_steps:
-        details.append(f"involving steps: {process_steps}")
-    
-    evidence_samples = _flatten_list(control.get("evidence_samples"))
-    if evidence_samples:
-        details.append(f"evidenced by: {evidence_samples}")
-    
-    metrics = _flatten_list(control.get("metrics"))
-    if metrics:
-        details.append(f"measured through: {metrics}")
-    
-    annexa_info = _flatten_annexa_mappings(control.get("annexA_map"))
-    if annexa_info:
-        details.append(f"mapped to {annexa_info}")
-    
-    if details:
-        paragraph += f" This control is {', '.join(details)}."
-    
-    return paragraph
+    base = []
+    if control_title and control_desc:
+        base.append(f"{org_context} implements {control_title}: {control_desc}.")
+    elif control_title:
+        base.append(f"{org_context} implements {control_title}.")
+    elif control_desc:
+        base.append(f"{org_context} describes a control: {control_desc}.")
+
+    if objective:
+        base.append(f"The objective is to {objective.lower()}.")
+
+    # Optional concise attributes
+    owner = _v(control.get("owner_role"))
+    if owner:
+        base.append(f"Owned by {owner}.")
+    status = _v(control.get("status"))
+    if status:
+        base.append(f"Current status: {status}.")
+    annexa = _annexa_readable(control.get("annexa_mappings"))
+    if annexa:
+        base.append(f"{annexa}.")
+    linked = _v(control.get("linked_risk_ids"))
+    if linked:
+        base.append(f"Addresses linked risks: {linked}.")
+
+    paragraph = " ".join(base).strip()
+    return paragraph if paragraph else (control_desc or control_title or org_context)
 
 class VectorIndexService:
     @staticmethod
@@ -588,43 +550,12 @@ class ControlVectorIndexService:
         user_ids = []
         orgs, locs, doms = [], [], []
         titles, descriptions, objectives = [], [], []
-        owner_roles, frequencies, policy_refs, statuses = [], [], [], []
-        rationales, assumptions_list = [], []
-        annexa_mappings, process_steps_list, evidence_samples_list, metrics_list = [], [], [], []
-        linked_risk_ids_list = []
+        owner_roles, statuses = [], []
+        annexa_mappings, linked_risk_ids_list = [], []
         texts = []
 
-        def _flatten_to_string(items, max_length=None):
-            """Helper to flatten list to comma-separated string"""
-            if not items:
-                return ""
-            if isinstance(items, list):
-                clean_items = [str(item).strip() for item in items if item and str(item).strip()]
-                result = ", ".join(clean_items)
-            else:
-                result = str(items) if items else ""
-            
-            return _truncate_field(result, max_length) if max_length else result
-
-        def _flatten_annexa_to_string(mappings):
-            """Convert AnnexA mappings to string format"""
-            if not mappings:
-                return ""
-            if isinstance(mappings, list):
-                formatted = []
-                for mapping in mappings:
-                    if isinstance(mapping, dict):
-                        id_val = mapping.get("id", "")
-                        title = mapping.get("title", "")
-                        if id_val and title:
-                            formatted.append(f"{id_val}:{title}")
-                        elif id_val:
-                            formatted.append(str(id_val))
-                result = ", ".join(formatted)
-            else:
-                result = str(mappings) if mappings else ""
-            
-            return _truncate_field(result, 2048)
+        def _clip(value: Any, max_len: int) -> str:
+            return _truncate_field(value or "", max_len)
 
         for c in controls:
             cid = str(c.get("control_id", ""))
@@ -639,18 +570,10 @@ class ControlVectorIndexService:
             descriptions.append(_truncate_field(c.get("control_description", "") or "", 8192))
             objectives.append(_truncate_field(c.get("objective", "") or "", 8192))
             owner_roles.append(_truncate_field(c.get("owner_role", "") or "", 128))
-            frequencies.append(_truncate_field(c.get("frequency", "") or "", 128))
-            policy_refs.append(_truncate_field(c.get("policy_ref", "") or "", 512))
             statuses.append(_truncate_field(c.get("status", "") or "", 128))
-            rationales.append(_truncate_field(c.get("rationale", "") or "", 8192))
-            assumptions_list.append(_truncate_field(c.get("assumptions", "") or "", 8192))
-            
-            # Flatten array attributes
-            annexa_mappings.append(_flatten_annexa_to_string(c.get("annexA_map")))
-            process_steps_list.append(_flatten_to_string(c.get("process_steps"), 8192))
-            evidence_samples_list.append(_flatten_to_string(c.get("evidence_samples"), 8192))
-            metrics_list.append(_flatten_to_string(c.get("metrics"), 4096))
-            linked_risk_ids_list.append(_flatten_to_string(c.get("linked_risk_ids"), 2048))
+            # Pre-formatted string fields
+            annexa_mappings.append(_clip(c.get("annexa_mappings"), 2048))
+            linked_risk_ids_list.append(_clip(c.get("linked_risk_ids"), 2048))
             
             # Generate comprehensive natural language paragraph using LLM
             control_text = _compose_control_sentence(c, organization_name, location, domain)
@@ -669,10 +592,8 @@ class ControlVectorIndexService:
         # Insert data with all attributes
         data = [
             control_ids, user_ids, orgs, locs, doms,
-            titles, descriptions, objectives, owner_roles, frequencies,
-            policy_refs, statuses, rationales, assumptions_list,
-            annexa_mappings, process_steps_list, evidence_samples_list, metrics_list,
-            linked_risk_ids_list, texts, vectors,
+            titles, descriptions, objectives, owner_roles, statuses,
+            annexa_mappings, linked_risk_ids_list, texts, vectors,
             [now]*len(control_ids), [now]*len(control_ids)
         ]
         collection.insert(data)
@@ -723,8 +644,7 @@ class ControlVectorIndexService:
             expr=filter_expr,
             output_fields=[
                 "control_id", "control_title", "control_description", "objective",
-                "owner_role", "frequency", "status", "control_text", "annexa_mappings",
-                "process_steps", "evidence_samples", "metrics", "linked_risk_ids"
+                "owner_role", "status", "control_text", "annexa_mappings", "linked_risk_ids"
             ]
         )
         
@@ -737,13 +657,9 @@ class ControlVectorIndexService:
                 "control_description": hit.entity.get("control_description"),
                 "objective": hit.entity.get("objective"),
                 "owner_role": hit.entity.get("owner_role"),
-                "frequency": hit.entity.get("frequency"),
                 "status": hit.entity.get("status"),
                 "control_text": hit.entity.get("control_text"),
                 "annexa_mappings": hit.entity.get("annexa_mappings"),
-                "process_steps": hit.entity.get("process_steps"),
-                "evidence_samples": hit.entity.get("evidence_samples"),
-                "metrics": hit.entity.get("metrics"),
                 "linked_risk_ids": hit.entity.get("linked_risk_ids"),
                 "similarity_score": hit.score,
             }
@@ -764,8 +680,6 @@ class ControlVectorIndexService:
             clauses.append(f"domain == '{filters['domain']}'")
         if filters.get("owner_role"):
             clauses.append(f"owner_role == '{filters['owner_role']}'")
-        if filters.get("frequency"):
-            clauses.append(f"frequency == '{filters['frequency']}'")
         if filters.get("status"):
             clauses.append(f"status == '{filters['status']}'")
         

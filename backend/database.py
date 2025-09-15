@@ -1350,17 +1350,12 @@ class ControlDatabaseService:
                     "control_title": control.control_title,
                     "control_description": control.control_description,
                     "objective": control.objective,
-                    "annexA_map": [{"id": mapping.id, "title": mapping.title} for mapping in control.annexA_map],
+                    "annexa_mappings": ", ".join([
+                        f"{m.id}:{m.title}" if getattr(m, 'title', None) else f"{m.id}" for m in control.annexA_map
+                    ]) if control.annexA_map else "",
                     "owner_role": control.owner_role,
-                    "process_steps": control.process_steps,
-                    "evidence_samples": control.evidence_samples,
-                    "metrics": control.metrics,
-                    "frequency": control.frequency,
-                    "policy_ref": control.policy_ref,
                     "status": control.status,
-                    "rationale": control.rationale,
-                    "assumptions": control.assumptions,
-                    "linked_risk_ids": control.linked_risk_ids  # Use actual FinalizedRisk objects from model
+                    "linked_risk_ids": ", ".join(control.linked_risk_ids) if control.linked_risk_ids else ""
                 }
                 
                 ControlVectorIndexService.upsert_finalized_controls(

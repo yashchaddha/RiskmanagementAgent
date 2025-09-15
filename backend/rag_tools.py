@@ -221,23 +221,23 @@ def semantic_risk_search(query: str, user_id: str, top_k: int = 5) -> dict:
         return {"hits": [], "count": 0, "error": str(e), "query": query, "user_id": user_id}
 
 @tool("semantic_control_search")
-def semantic_control_search(query: str, user_id: str, annex_filter: Optional[str] = None, linked_risk_ids: Optional[str] = None, top_k: int = 5) -> dict:
+def semantic_control_search(query: str, user_id: str, filters: Optional[Dict[str, str]] = None, top_k: int = 5) -> dict:
     """
-    Return ONLY lightweight metadata for the best-matching controls.
-    Schema:
-      {
-        "query": str,
-        "user_id": str,
-        "count": int,
-        "hits": [
-          {
-            "control_id": str,
-            "title": str,
-            "summary": str,     # <= 200 chars
-            "score": float
-          }
-        ]
-      }
+    Hybrid search for controls using Milvus scalar filtering + semantic search.
+    
+    Args:
+        query: Search query text for semantic similarity
+        user_id: User identifier (always applied as filter)
+        filters: Dict of field filters, e.g. {"owner_role": "CIO", "status": "Active", "annexa_mappings": "A.5.30"}
+        top_k: Number of results to return
+    
+    Returns:
+        {
+          "query": str,
+          "user_id": str, 
+          "count": int,
+          "hits": [{"control_id": str, "title": str, "score": float, ...}]
+        }
     """
     try:
         emb = OpenAIEmbeddings(model="text-embedding-3-small")
@@ -248,20 +248,29 @@ def semantic_control_search(query: str, user_id: str, annex_filter: Optional[str
             token=os.getenv("ZILLIZ_TOKEN"),
             secure=True
         )
+        
+        # Build filter expression using Milvus scalar filtering
         filter_exp = f"user_id == '{user_id}'"
-        if annex_filter and annex_filter.strip():
-            filter_exp += f" && annexa_mappings like '%{annex_filter.strip()}%'"
-        if linked_risk_ids and linked_risk_ids.strip():
-            filter_exp += f" && linked_risk_ids like '%{linked_risk_ids.strip()}%'"
-        # Only fetch tiny fields needed to build a short summary
+        if filters:
+            for field, value in filters.items():
+                if field == "annexa_mappings":
+                    # Use LIKE for partial matching on annex mappings
+                    filter_exp += f" && annexa_mappings like '%{value}%'"
+                elif field == "linked_risk_ids":
+                    # Use LIKE for partial matching on linked risk IDs
+                    filter_exp += f" && linked_risk_ids like '%{value}%'"
+                else:
+                    # Exact match for other fields
+                    filter_exp += f" && {field} == '{value}'"
+        # Only fetch allowed fields from the controls schema
         OUTPUT_FIELDS = [
-            "control_id", "control_title", "control_description", "objective", "user_id", "control_text"
+            "control_id", "control_title", "control_description", "objective", "owner_role", "status", "annexa_mappings", "linked_risk_ids", "control_text", "user_id"
         ]
 
-        print(f"🔍 semantic_control_search: query='{query}', user_id='{user_id}', annex_filter='{annex_filter}', linked_risk_ids='{linked_risk_ids}', top_k={top_k}")
+        print(f"🔍 semantic_control_search: query='{query}', user_id='{user_id}', filters={filters}, top_k={top_k}")
 
         res = client.search(
-            collection_name="finalized_controls_index",
+            collection_name="finalized_controls",
             data=[qv],
             anns_field="embedding",
             limit=min(top_k, 8),
@@ -281,6 +290,12 @@ def semantic_control_search(query: str, user_id: str, annex_filter: Optional[str
                 hits.append({
                     "control_id": entity.get("control_id"),
                     "title": entity.get("control_title"),
+                    "description": entity.get("control_description"),
+                    "objective": entity.get("objective"),
+                    "owner_role": entity.get("owner_role"),
+                    "status": entity.get("status"),
+                    "annexa_mappings": entity.get("annexa_mappings"),
+                    "linked_risk_ids": entity.get("linked_risk_ids"),
                     "summary": entity.get("control_text"),
                     "score": score
                 })
@@ -322,15 +337,15 @@ def fetch_controls_by_id(query: str, user_id: str, linked_risk_ids: Optional[str
         filter_exp = f"user_id == '{user_id}'"
         if linked_risk_ids and linked_risk_ids.strip():
             filter_exp += f" && linked_risk_ids like '%{linked_risk_ids.strip()}%'"
-        # Only fetch tiny fields needed to build a short summary
+        # Only fetch allowed fields from the controls schema
         OUTPUT_FIELDS = [
-            "control_id", "control_title", "control_description", "objective", "annexa_mappings", "linked_risk_ids", "owner_role", "process_steps", "evidence_samples", "metrics", "frequency", "policy_ref", "status", "rationale", "assumptions", "control_text", "user_id", "created_at", "updated_at"
+            "control_id", "control_title", "control_description", "objective", "owner_role", "status", "annexa_mappings", "linked_risk_ids", "control_text", "user_id", "created_at", "updated_at"
         ]
 
         print(f"🔍 fetch_controls_by_id: query='{query}', user_id='{user_id}', linked_risk_ids='{linked_risk_ids}', top_k={top_k}")
 
         res = client.search(
-            collection_name="finalized_controls_index",
+            collection_name="finalized_controls",
             data=[qv],
             anns_field="embedding",
             limit=min(top_k, 2),
@@ -383,7 +398,7 @@ def fetch_controls_by_id(query: str, user_id: str, linked_risk_ids: Optional[str
 #         # Pseudo-impl: You might maintain a parallel KV store, or query Milvus by expr:
 #         expr = f"user_id == '{user_id}' && control_id in [{','.join([repr(i) for i in control_ids])}]"
 #         res = client.query(
-#             collection_name="finalized_controls_index",
+#             collection_name="finalized_controls",
 #             expr=expr,
 #             output_fields=OUTPUT_FIELDS
 #         )

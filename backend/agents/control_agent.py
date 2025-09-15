@@ -134,8 +134,7 @@ def control_library_node(state: LLMState) -> LLMState:
 
     # 2) Bind tools directly (predictable tool-calling; small prompt)
     model = get_llm()
-    # Include fetch_controls_by_id if you've added it; otherwise omit.
-    tools_list = [semantic_control_search, semantic_risk_search, fetch_controls_by_id]
+    tools_list = [semantic_control_search, semantic_risk_search]
 
 
     llm = model.bind_tools(tools_list)
