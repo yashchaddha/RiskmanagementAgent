@@ -68,6 +68,14 @@ def signup(user: UserCreate):
     }
     
     users_collection.insert_one(user_data)
+
+    # Create Org node in KG for this user
+    try:
+        from graph_kg import upsert_org, ensure_constraints
+        ensure_constraints()
+        upsert_org(user.organization_name, user.location, user.domain)
+    except Exception as e:
+        print(f"Warning: KG org upsert failed for {user.username}: {e}")
     
     # Create default risk profiles for the new user and get their IDs
     try:

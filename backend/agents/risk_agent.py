@@ -4,7 +4,16 @@ from langchain.schema import HumanMessage, AIMessage, SystemMessage
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from dependencies import get_llm
 from agent import make_llm_call_with_history
-from rag_tools import semantic_risk_search, get_risk_profiles, knowledge_base_search
+from rag_tools import (
+    semantic_risk_search,
+    graph_filter_risks,
+    hybrid_risk_search,
+    advanced_graph_reasoning,
+    contextual_control_reasoning,
+    get_risk_profiles,
+    knowledge_base_search,
+)
+from graph_tools import graph_search_risks, graph_related, graph_hydrate
 from models import LLMState
 import json
 from langgraph.prebuilt import create_react_agent
@@ -305,9 +314,11 @@ def risk_register_node(state: LLMState):
         risk_context = state.get("risk_context", {}) or {}
         user_data = state.get("user_data", {}) or {}
         user_id = user_data.get("username", "") or user_data.get("user_id", "") or ""
+        organization_name = user_data.get("organization_name") or risk_context.get("organization") or "your organization"
+        organization_name = organization_name.strip() or "your organization"
 
         model = get_llm()
-        system_prompt = load_prompt("risk_register_assistant.txt", {"user_id": user_id}).strip()
+        system_prompt = load_prompt("risk_register_assistant.txt", {"user_id": user_id, "organization_name": organization_name}).strip()
 
         messages = [SystemMessage(content=system_prompt)]
         recent_history = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
@@ -319,15 +330,19 @@ def risk_register_node(state: LLMState):
 
         messages.append(HumanMessage(content=user_input))
 
-        bound = model.bind_tools([semantic_risk_search])
+        # Use advanced graph reasoning for comprehensive search capabilities
+        tools_list = [graph_search_risks, graph_related, graph_hydrate]
 
-        max_steps = 3 
+        llm = model.bind_tools(tools_list)
+        tool_registry = {t.name: t for t in tools_list}
+
+        max_steps = 4 
         step = 0
         final_ai_msg = None
 
         while step < max_steps:
             step += 1
-            ai_msg = bound.invoke(messages)
+            ai_msg = llm.invoke(messages)
             tool_calls = getattr(ai_msg, "tool_calls", None)
 
             if not tool_calls:
@@ -340,19 +355,33 @@ def risk_register_node(state: LLMState):
                 args = tc.get("args", {}) or {}
                 call_id = tc.get("id")
 
-                if name == "semantic_risk_search":
-                    args.setdefault("user_id", user_id)
-                    args.setdefault("top_k", 5)
-                    if not args.get("query"):
-                        args["query"] = user_input
+                if name in tool_registry:
+                    tool_func = tool_registry[name]
+                    
+                    # Align tool arguments with risk register prompt guidance
+                    if name == "graph_search_risks":
+                        args.setdefault("hints", user_input)
+                        args["org"] = organization_name
+                        args.setdefault("top_k", 5)
+                        args.setdefault("page", 1)
+                    elif name == "graph_related":
+                        args["org"] = organization_name
+                        args.setdefault("anchor_type", "risk")
+                        args.setdefault("relation_types", ["MITIGATES", "MAPS_TO"])
+                        args.setdefault("hops", 1)
+                        args.setdefault("top_k", 2)
+                    elif name == "graph_hydrate":
+                        args.setdefault("kind", "risk")
+                        if organization_name:
+                            args.setdefault("org", organization_name)
 
                     try:
-                        if hasattr(semantic_risk_search, "invoke"):
-                            tool_result = semantic_risk_search.invoke(args)
+                        if hasattr(tool_func, "invoke"):
+                            tool_result = tool_func.invoke(args)
                         else:
-                            tool_result = semantic_risk_search(**args)
+                            tool_result = tool_func(**args)
                     except Exception as tool_err:
-                        tool_result = {"error": f"semantic_risk_search failed: {tool_err}"}
+                        tool_result = {"error": f"{name} failed: {tool_err}"}
 
                     tool_messages.append(
                         ToolMessage(
@@ -658,10 +687,10 @@ def risk_knowledge_node(state: LLMState):
                 messages.append(AIMessage(content=turn["assistant"]))
         messages.append(HumanMessage(content=user_input))
 
-        # Use create_react_agent with ONLY get_risk_profiles (tool isolation)
+        # Use comprehensive graph reasoning tools for risk knowledge
         agent = create_react_agent(
             model=model,
-            tools=[get_risk_profiles]
+            tools=[get_risk_profiles, hybrid_risk_search, advanced_graph_reasoning]
         )
 
         result = agent.invoke({"messages": messages})

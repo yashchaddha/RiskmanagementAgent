@@ -453,6 +453,20 @@ class RiskDatabaseService:
                         risks=risks_dicts
                     )
 
+                    # Upsert to Knowledge Graph: Org + Risks
+                    try:
+                        from graph_kg import upsert_org, upsert_risk
+                        org_info = {
+                            "organization_name": organization_name,
+                            "location": location,
+                            "domain": domain,
+                        }
+                        upsert_org(org_info["organization_name"], org_info["location"], org_info["domain"])
+                        for r in updated_doc.get("risks", []) or []:
+                            upsert_risk(r, org_info)
+                    except Exception as kg_e:
+                        print(f"KG upsert warning (finalized risks update): {kg_e}")
+
                     return FinalizedRisksResponse(
                         success=True,
                         message=f"Successfully finalized {len(finalized_risks)} risks. Total finalized risks: {total_risks}",
@@ -552,6 +566,20 @@ class RiskDatabaseService:
                     domain=domain,
                     risks=risks_dicts
                 )
+
+                # Upsert to Knowledge Graph: Org + Risks
+                try:
+                    from graph_kg import upsert_org, upsert_risk
+                    org_info = {
+                        "organization_name": organization_name,
+                        "location": location,
+                        "domain": domain,
+                    }
+                    upsert_org(org_info["organization_name"], org_info["location"], org_info["domain"])
+                    for r in inserted_doc.get("risks", []) or []:
+                        upsert_risk(r, org_info)
+                except Exception as kg_e:
+                    print(f"KG upsert warning (finalized risks insert): {kg_e}")
 
                 return FinalizedRisksResponse(
                     success=True,
@@ -1367,7 +1395,20 @@ class ControlDatabaseService:
                 )
             except Exception as e:
                 print(f"Warning: Failed to index control in vector database: {e}")
-            
+
+            # Upsert to Knowledge Graph (Org + Control)
+            try:
+                from graph_kg import upsert_org, upsert_control
+                org_info = {
+                    "organization_name": user.get("organization_name"),
+                    "location": user.get("location"),
+                    "domain": user.get("domain"),
+                }
+                upsert_org(org_info["organization_name"], org_info["location"], org_info["domain"])
+                upsert_control(inserted_doc, org_info)
+            except Exception as kg_e:
+                print(f"KG upsert warning (control create): {kg_e}")
+
             return ControlResponse(
                 success=True,
                 message="Control saved successfully",
@@ -1571,7 +1612,20 @@ class ControlDatabaseService:
                     created_at=updated_doc["created_at"],
                     updated_at=updated_doc["updated_at"]
                 )
-                
+
+                # Upsert to Knowledge Graph to reflect new properties/edges
+                try:
+                    from graph_kg import upsert_org, upsert_control
+                    org_info = {
+                        "organization_name": user.get("organization_name"),
+                        "location": user.get("location"),
+                        "domain": user.get("domain"),
+                    }
+                    upsert_org(org_info["organization_name"], org_info["location"], org_info["domain"])
+                    upsert_control(updated_doc, org_info)
+                except Exception as kg_e:
+                    print(f"KG upsert warning (control update): {kg_e}")
+
                 return ControlResponse(
                     success=True,
                     message="Control updated successfully",

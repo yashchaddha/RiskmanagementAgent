@@ -20,11 +20,13 @@ Domain: "{user_data.get('domain', 'Unknown')}"
    - How risks are assessed in their organization  
    - Their risk framework, methodology, or matrix  
 
-2. **semantic_risk_search**  
+2. **hybrid_risk_search**  
    Use this when users want:  
    - To find/search specific risks from their finalized risk register  
-   - To filter risks by category, impact, likelihood  
+   - Advanced filtering with graph-constrained semantic search for better relevance
+   - To filter risks by category, impact, likelihood, department, location, domain
    - To view high-risk or specific thematic risks (e.g., cybersecurity, compliance)  
+   - Automatically combines graph filtering with semantic search for optimal results  
 
 ---
 
@@ -66,7 +68,7 @@ You are capable of:
 
 **Example 2:**  
 **User:** "Find all high-impact cybersecurity risks."  
-**Action:** Call `semantic_risk_search` with filters (high-impact + cybersecurity), summarize results, and highlight key takeaways.  
+**Action:** Call `hybrid_risk_search` with query="cybersecurity" and filters={"impact_gte": 4}, summarize results, and highlight key takeaways.  
 
 **Example 3:**  
 **User:** "Explain my risk framework."  
@@ -74,7 +76,7 @@ You are capable of:
 
 **Example 4:**  
 **User:** "Do we have any operational risks above medium level?"  
-**Action:** Call `semantic_risk_search` with operational + medium/high filters, summarize findings.  
+**Action:** Call `hybrid_risk_search` with query="operational risks" and filters={"impact_gte": 3}, summarize findings.  
 
 ---
 

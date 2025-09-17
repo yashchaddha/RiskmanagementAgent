@@ -7,6 +7,8 @@ from database import RiskDatabaseService, RiskProfileDatabaseService, ControlDat
 from models import FinalizedRisk, Risk, GeneratedRisks, RiskResponse, FinalizedRisks, FinalizedRisksResponse, Control, ControlResponse, ControlsResponse, AnnexAMapping
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+from graph_kg import ensure_constraints
+from knowledge_graph_ingest import ingest_iso_knowledge
 
 app = FastAPI(title="Risk Management Agent API", version="1.0.0")
 
@@ -61,6 +63,27 @@ def read_root():
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "service": "Risk Management Agent"}
+
+
+# --- Knowledge Graph (Neo4j) utilities ---
+@app.post("/kg/bootstrap")
+def kg_bootstrap(current_user=Depends(get_current_user)):
+    """Create Neo4j constraints/indexes for the minimal model."""
+    try:
+        ensure_constraints()
+        return {"success": True, "message": "KG constraints ensured"}
+    except Exception as e:
+        return {"success": False, "message": f"Error ensuring constraints: {str(e)}"}
+
+
+@app.post("/kg/ingest-iso")
+def kg_ingest_iso(current_user=Depends(get_current_user)):
+    """Ingest static ISO 27001 knowledge base (Clauses, Annex A) into Neo4j."""
+    try:
+        counts = ingest_iso_knowledge()
+        return {"success": True, "message": "ISO knowledge ingested", "counts": counts}
+    except Exception as e:
+        return {"success": False, "message": f"Error during ISO ingestion: {str(e)}"}
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, current_user=Depends(get_current_user)):
