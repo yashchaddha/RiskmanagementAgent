@@ -1,15 +1,9 @@
 import os
 from typing import Dict, Any
-
 from dotenv import load_dotenv
-from neo4j import GraphDatabase
-
 from knowledge_base import ISO_27001_KNOWLEDGE
 from graph_kg import get_driver
-
-
 load_dotenv()
-
 
 def ensure_kb_constraints() -> None:
     drv = get_driver()
@@ -25,7 +19,6 @@ def ensure_kb_constraints() -> None:
                 s.run(c)
             except Exception:
                 pass
-
 
 def ingest_iso_knowledge() -> Dict[str, int]:
     """Ingest static ISO 27001 knowledge (clauses + Annex A) into Neo4j."""
@@ -109,7 +102,7 @@ def ingest_iso_knowledge() -> Dict[str, int]:
                         ac.is_domain = false
                     WITH ac
                     MATCH (ad:Annex {code: $dcode})
-                    MERGE (ad)-[:HAS_CONTROL]->(ac)
+                    MERGE (ad)-[:CONTAINS]->(ac)
                     """,
                     ccode=ccode,
                     title=ctrl.get("title"),
@@ -125,11 +118,9 @@ def ingest_iso_knowledge() -> Dict[str, int]:
         "annex_controls": n_annex_controls,
     }
 
-
 def main():
     counts = ingest_iso_knowledge()
     print("ISO knowledge graph ingestion complete:", counts)
-
 
 if __name__ == "__main__":
     main()

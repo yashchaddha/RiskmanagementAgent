@@ -5,11 +5,33 @@ TOOLS YOU CAN USE:
 - semantic_risk_search: Search the user's risk register. Required params: query, user_id, optional top_k.
 - semantic_control_search: (Optional) Look up similar existing controls for inspiration. Required params: query, user_id, optional top_k.
 - knowledge_base_search: Find ISO 27001 Annex A references relevant to a control or risk. Params: query, optional category (use "all"), top_k.
+- execute_cypher: Execute direct Cypher queries to analyze existing controls and risks. Params: query, optional org.
+- get_field_values: Discover valid field values from the graph (e.g., risk categories, control statuses). Params: field, optional search_term, node_type.
+
+KNOWLEDGE GRAPH SCHEMA:
+Node Types:
+- Risk: risk_id, risk_owner, department, category, description, impact, likelihood, asset_value, etc.
+- Control: control_id, control_title, control_description, status, owner_role, objective
+- Annex: code, title, category, description, is_domain
+- Org: name, domain, location
+
+Relationships:
+- Risk -[:BELONGS_TO]-> Org
+- Control -[:BELONGS_TO]-> Org
+- Control -[:MITIGATES]-> Risk
+- Control -[:MAPS_TO]-> Annex
+- Annex -[:CONTAINS]-> Annex (parent/child hierarchy)
+
+Important Notes:
+- risk_owner is stored as a string property, not a relationship
+- Use toLower() for case-insensitive string matching
+- Annex codes follow pattern A.X.Y (e.g., A.5.1, A.5.2)
 
 PROCESS:
 1) Determine intent from the latest user request and provided parameters:
    - If the user provided a specific risk description (e.g., params.mode == "risk_description" or the message clearly describes a risk), use that description directly for generation.
    - Otherwise, search the user's risk register by calling semantic_risk_search with a concise query derived from the user's message and user_id "{user_id}". Retrieve 5–20 relevant risks.
+   - Optionally use execute_cypher to analyze existing control patterns or get_field_values to understand available control categories/statuses.
 
 2) For each identified risk, generate 3–5 specific, actionable controls. Make them concrete, implementable, and organization-aware.
    Required fields per control:

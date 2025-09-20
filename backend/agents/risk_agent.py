@@ -6,14 +6,9 @@ from dependencies import get_llm
 from agent import make_llm_call_with_history
 from rag_tools import (
     semantic_risk_search,
-    graph_filter_risks,
-    hybrid_risk_search,
-    advanced_graph_reasoning,
-    contextual_control_reasoning,
     get_risk_profiles,
-    knowledge_base_search,
 )
-from graph_tools import graph_search_risks, graph_related, graph_hydrate
+from graph_tools import execute_cypher, get_field_values
 from models import LLMState
 import json
 from langgraph.prebuilt import create_react_agent
@@ -330,22 +325,25 @@ def risk_register_node(state: LLMState):
 
         messages.append(HumanMessage(content=user_input))
 
-        # Use advanced graph reasoning for comprehensive search capabilities
-        tools_list = [graph_search_risks, graph_related, graph_hydrate]
+        # Use direct cypher execution with field value discovery for maximum search flexibility
+        tools_list = [execute_cypher, get_field_values]
 
         llm = model.bind_tools(tools_list)
         tool_registry = {t.name: t for t in tools_list}
 
-        max_steps = 4 
+        max_steps = 4
         step = 0
         final_ai_msg = None
 
         while step < max_steps:
             step += 1
+            print(f"Risk Register Node - Step {step}")
             ai_msg = llm.invoke(messages)
             tool_calls = getattr(ai_msg, "tool_calls", None)
+            print(f"Tool calls in step {step}: {len(tool_calls) if tool_calls else 0}")
 
             if not tool_calls:
+                print(f"No tool calls, setting final message: {ai_msg.content[:100] if hasattr(ai_msg, 'content') else 'No content'}")
                 final_ai_msg = ai_msg
                 break
 
@@ -359,21 +357,13 @@ def risk_register_node(state: LLMState):
                     tool_func = tool_registry[name]
                     
                     # Align tool arguments with risk register prompt guidance
-                    if name == "graph_search_risks":
-                        args.setdefault("hints", user_input)
-                        args["org"] = organization_name
-                        args.setdefault("top_k", 5)
-                        args.setdefault("page", 1)
-                    elif name == "graph_related":
-                        args["org"] = organization_name
-                        args.setdefault("anchor_type", "risk")
-                        args.setdefault("relation_types", ["MITIGATES", "MAPS_TO"])
-                        args.setdefault("hops", 1)
-                        args.setdefault("top_k", 2)
-                    elif name == "graph_hydrate":
-                        args.setdefault("kind", "risk")
-                        if organization_name:
+                    if name == "execute_cypher":
+                        # Add org parameter if available for potential use in queries
+                        if organization_name and organization_name != "your organization":
                             args.setdefault("org", organization_name)
+                    elif name == "get_field_values":
+                        # Default to Risk node type for risk register queries
+                        args.setdefault("node_type", "Risk")
 
                     try:
                         if hasattr(tool_func, "invoke"):
@@ -383,10 +373,26 @@ def risk_register_node(state: LLMState):
                     except Exception as tool_err:
                         tool_result = {"error": f"{name} failed: {tool_err}"}
 
+                    # Ensure tool result is JSON-serializable for ToolMessage content
+                    try:
+                        content_str = json.dumps(tool_result, default=str)
+                    except Exception as ser_err:
+                        # Fallback to a minimal safe representation
+                        print(f"Serialization warning for tool '{name}': {ser_err}")
+                        try:
+                            content_str = json.dumps({
+                                "success": tool_result.get("success", True) if isinstance(tool_result, dict) else True,
+                                "count": tool_result.get("count", len(tool_result.get("results", []))) if isinstance(tool_result, dict) else 0,
+                                "message": "Non-JSON types converted to string",
+                                "data": str(tool_result)
+                            })
+                        except Exception:
+                            content_str = str(tool_result)
+
                     tool_messages.append(
                         ToolMessage(
                             tool_call_id=call_id,
-                            content=json.dumps(tool_result)
+                            content=content_str
                         )
                     )
                 else:
@@ -398,11 +404,19 @@ def risk_register_node(state: LLMState):
                     )
 
             messages = messages + [ai_msg] + tool_messages
+        if final_ai_msg is None:
+            print(f"Loop ended without final response, giving LLM final chance to respond")
+            try:
+                final_response = llm.invoke(messages)
+                final_ai_msg = final_response
+                print(f"Final LLM response: {final_response.content[:100] if hasattr(final_response, 'content') else 'No content'}")
+            except Exception as e:
+                print(f"Error getting final LLM response: {e}")
 
         if final_ai_msg is None:
+            print("WARNING: final_ai_msg is None, falling back to generic message")
             final_text = (
-                "I’ve opened your risk register. You can ask me to search it, e.g., "
-                "“find cyber risks about ransomware” or “show data privacy risks with high impact.”"
+                "I've opened your risk register. You can ask me to search it."
             )
         else:
             if isinstance(final_ai_msg.content, str):
@@ -690,7 +704,7 @@ def risk_knowledge_node(state: LLMState):
         # Use comprehensive graph reasoning tools for risk knowledge
         agent = create_react_agent(
             model=model,
-            tools=[get_risk_profiles, hybrid_risk_search, advanced_graph_reasoning]
+            tools=[get_risk_profiles]
         )
 
         result = agent.invoke({"messages": messages})

@@ -14,11 +14,58 @@ Domain: {user_domain}
 
 ### AVAILABLE TOOLS
 
-1. **semantic_control_search**  
-   Use this when users want:  
-   - To find/search specific controls from their control library  
-   - To filter controls by annexes, categories, or other attributes  
-   - To view specific thematic controls (e.g., cybersecurity, compliance)  
+1. **execute_cypher(query, org?)**
+   - Execute direct Cypher queries against the Neo4j knowledge graph
+   - Use for complex searches and analysis of controls, risks, and relationships
+   - Include user organization filter when relevant
+   - Examples:
+     * Analyze control effectiveness: "MATCH (c:Control)-[:MITIGATES]->(r:Risk) RETURN c.status, count(r) as risk_count"
+     * Find control gaps: "MATCH (a:Annex) WHERE NOT (a)<-[:MAPS_TO]-(:Control) RETURN a"
+
+2. **get_field_values(field, search_term?, node_type?)**
+   - Discover actual field values from the graph for better analysis
+   - Use to understand available statuses, categories, departments, etc.
+   - Examples:
+     * get_field_values("status", node_type="Control") - all control statuses
+     * get_field_values("impact", search_term="high") - high-impact related values
+
+3. **knowledge_base_search(query, category?, top_k?)**
+   - Search ISO 27001 knowledge base for control standards and best practices
+   - Use for explaining control concepts and implementation guidance
+
+4. **semantic_control_search(query, user_id, top_k?)**
+   - Semantic search for controls using embeddings
+   - Use when users want to find specific controls from their library
+   - Use for thematic control searches (e.g., cybersecurity, compliance)
+
+---
+
+### KNOWLEDGE GRAPH SCHEMA
+
+Node Types:
+- Risk: risk_id, risk_owner, department, category, description, impact, likelihood, asset_value, etc.
+- Control: control_id, control_title, control_description, status, owner_role, objective
+- Annex: code, title, category, description, is_domain
+- Org: name, domain, location
+- User: username, user_id
+
+Relationships:
+- Risk -[:BELONGS_TO]-> Org
+- Control -[:BELONGS_TO]-> Org
+- Control -[:MITIGATES]-> Risk
+- Control -[:MAPS_TO]-> Annex
+- Annex -[:CONTAINS]-> Annex (parent/child hierarchy)
+- User -[:OWNS]-> Org
+
+Important Notes:
+- risk_owner is stored as a string property (e.g., "Pranav"), not a relationship
+- Use toLower() for case-insensitive string matching
+- Annex codes follow pattern A.X.Y (e.g., A.5.1, A.5.2)
+
+Example Cypher Queries:
+- Find controls by status: "MATCH (c:Control) WHERE toLower(c.status) = 'active' RETURN c"
+- Analyze control coverage: "MATCH (c:Control)-[:MITIGATES]->(r:Risk) RETURN c.status, count(r) as risk_count"
+- Find control gaps by annex: "MATCH (a:Annex) WHERE NOT (a)<-[:MAPS_TO]-(:Control) RETURN a"
 
 ---
 

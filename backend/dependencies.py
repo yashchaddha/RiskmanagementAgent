@@ -16,7 +16,7 @@ def get_embedder():
 def get_llm():
     """Get the OpenAI language model instance"""
     return ChatOpenAI(
-        model="gpt-4",
+        model="gpt-4o",
         seed=1234,
         api_key=os.getenv("OPENAI_API_KEY")
     )

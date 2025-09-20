@@ -9,7 +9,6 @@ from dependencies import get_llm, make_llm_call_with_history
 from agents.risk_agent import risk_node, risk_generation_node, risk_register_node, matrix_recommendation_node, risk_knowledge_node
 from agents.control_agent import control_node, control_generate_node, control_library_node, control_knowledge_node
 from langgraph.prebuilt import create_react_agent
-from langsmith import traceable
 from rag_tools import knowledge_base_search
 from prompt_utils import load_prompt
 
@@ -183,7 +182,6 @@ def knowledge_node(state: LLMState):
                 messages.append(AIMessage(content=turn["assistant"]))
         messages.append(HumanMessage(content=user_input))
 
-        # Use create_react_agent for simpler tool handling
         agent = create_react_agent(
             model=model,
             tools=[knowledge_base_search]

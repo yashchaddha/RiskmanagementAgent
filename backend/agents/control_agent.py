@@ -7,12 +7,12 @@ from dependencies import get_llm
 from agent import make_llm_call_with_history
 from rag_tools import (
     semantic_risk_search,
-    fetch_controls_by_id,
     knowledge_base_search,
     semantic_control_search,
-    hybrid_control_search,
-    graph_filter_controls,
-    contextual_control_reasoning,
+)
+from graph_tools import (
+    execute_cypher,
+    get_field_values,
 )
 from models import LLMState
 import json
@@ -142,8 +142,8 @@ def control_library_node(state: LLMState) -> LLMState:
 
     # 2) Bind tools directly (predictable tool-calling; small prompt)
     model = get_llm()
-    # Prefer KG-first hybrid search with advanced reasoning, keep semantic tools for fallback and risk context
-    tools_list = [hybrid_control_search, contextual_control_reasoning, graph_filter_controls, semantic_risk_search]
+    # Use new graph tools for control library search
+    tools_list = [execute_cypher, get_field_values, semantic_risk_search, semantic_control_search]
 
 
     llm = model.bind_tools(tools_list)
@@ -324,7 +324,7 @@ def control_knowledge_node(state: LLMState) -> LLMState:
                 messages.append(AIMessage(content=ex["assistant"]))
         messages.append(HumanMessage(content=user_input))
 
-        agent = create_react_agent(model=model, tools=[knowledge_base_search, contextual_control_reasoning])
+        agent = create_react_agent(model=model, tools=[knowledge_base_search, execute_cypher, get_field_values])
         result = agent.invoke({"messages": messages})
         last = result.get("messages", [])[-1]
         final_text = getattr(last, "content", getattr(last, "text", "")) or "I couldn't retrieve knowledge entries right now. Please try again."
@@ -455,7 +455,7 @@ JSON RESPONSE FORMAT:
 
         agent = create_react_agent(
             model=model,
-            tools=[semantic_risk_search, knowledge_base_search, contextual_control_reasoning],
+            tools=[semantic_risk_search, knowledge_base_search, execute_cypher, get_field_values],
         )
         result = agent.invoke({"messages": messages})
         # Extract final assistant content
