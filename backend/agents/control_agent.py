@@ -315,10 +315,57 @@ def control_knowledge_node(state: LLMState) -> LLMState:
                 messages.append(AIMessage(content=ex["assistant"]))
         messages.append(HumanMessage(content=user_input))
 
-        agent = create_react_agent(model=model, tools=[knowledge_base_search])
-        result = agent.invoke({"messages": messages})
-        last = result.get("messages", [])[-1]
-        final_text = getattr(last, "content", getattr(last, "text", "")) or "I couldn't retrieve knowledge entries right now. Please try again."
+        # Switch to bind_tools deterministic loop (consistent with control_library_node)
+        tools_list = [knowledge_base_search, semantic_control_search]
+        llm = model.bind_tools(tools_list)
+        tool_registry = {t.name: t for t in tools_list}
+
+        MAX_TOOL_STEPS = 6
+        final_ai = None
+        for _ in range(MAX_TOOL_STEPS):
+            ai_msg = llm.invoke(messages)
+            messages.append(ai_msg)
+            final_ai = ai_msg
+
+            tool_calls = getattr(ai_msg, "tool_calls", None) or []
+            if not tool_calls:
+                break
+
+            for call in tool_calls:
+                tname = call.get("name")
+                if tname not in tool_registry:
+                    messages.append(ToolMessage(
+                        content=f'{{"error":"unknown_tool","name":"{tname}"}}',
+                        tool_call_id=call.get("id"),
+                    ))
+                    continue
+                try:
+                    result = tool_registry[tname].invoke(call.get("args", {}))
+                except Exception as e:
+                    result = {"error": str(e)}
+
+                import json as _json
+                payload = result if isinstance(result, str) else _json.dumps(result, ensure_ascii=False)
+
+                messages.append(ToolMessage(
+                    content=payload,
+                    tool_call_id=call.get("id"),
+                    name=tname,
+                ))
+
+        # Extract final text
+        final_text = ""
+        if final_ai and getattr(final_ai, "content", None):
+            if isinstance(final_ai.content, list):
+                final_text = " ".join(part.content if hasattr(part, "content") else str(part)
+                                      for part in final_ai.content if part)
+            else:
+                final_text = str(final_ai.content)
+
+        if not final_text.strip():
+            final_text = (
+                "I couldn't retrieve knowledge entries right now. Please try again."
+            )
         updated_history = conversation_history + [{"user": user_input, "assistant": final_text}]
         return {
             **state, 
@@ -444,26 +491,60 @@ JSON RESPONSE FORMAT:
 
         messages.append(HumanMessage(content=user_input))
 
-        agent = create_react_agent(
-            model=model,
-            tools=[semantic_risk_search, knowledge_base_search],
-        )
-        result = agent.invoke({"messages": messages})
-        # Extract final assistant content
-        # get the tool calls for debugging
-        tool_calls = []
-        for message in result.get("messages", []):
-            if hasattr(message, "tool_calls") and message.tool_calls:
-                tool_calls.extend(message.tool_calls)
-            elif isinstance(message, ToolMessage):
-                tool_calls.append(message)
-        
+        # Replace create_react_agent with bind_tools deterministic loop
+        tools_list = [semantic_risk_search, knowledge_base_search]
+        llm = model.bind_tools(tools_list)
+        tool_registry = {t.name: t for t in tools_list}
+
+        MAX_TOOL_STEPS = 8
+        final_ai = None
+        debug_tool_calls = []
+        for _ in range(MAX_TOOL_STEPS):
+            ai_msg = llm.invoke(messages)
+            messages.append(ai_msg)
+            final_ai = ai_msg
+
+            tool_calls = getattr(ai_msg, "tool_calls", None) or []
+            if not tool_calls:
+                break
+
+            for call in tool_calls:
+                debug_tool_calls.append(call)
+                tname = call.get("name")
+                if tname not in tool_registry:
+                    messages.append(ToolMessage(
+                        content=f'{{"error":"unknown_tool","name":"{tname}"}}',
+                        tool_call_id=call.get("id"),
+                    ))
+                    continue
+                try:
+                    result = tool_registry[tname].invoke(call.get("args", {}))
+                except Exception as e:
+                    result = {"error": str(e)}
+
+                import json as _json
+                payload = result if isinstance(result, str) else _json.dumps(result, ensure_ascii=False)
+                if len(payload) > 14000:
+                    payload = payload[:14000] + "…"
+
+                messages.append(ToolMessage(
+                    content=payload,
+                    tool_call_id=call.get("id"),
+                    name=tname,
+                ))
+
         # Print tool calls for debugging
-        for tool_call in tool_calls:
+        for tool_call in debug_tool_calls:
             print(f"Tool Call: {tool_call}")
 
-        final_msg = result["messages"][-1]
-        response_content = getattr(final_msg, "content", getattr(final_msg, "text", "")) or ""
+        # Extract final assistant content
+        response_content = ""
+        if final_ai and getattr(final_ai, "content", None):
+            if isinstance(final_ai.content, list):
+                response_content = " ".join(part.content if hasattr(part, "content") else str(part)
+                                             for part in final_ai.content if part)
+            else:
+                response_content = str(final_ai.content)
         
         print(f"LLM Response received: {response_content[:100]}...")
         
