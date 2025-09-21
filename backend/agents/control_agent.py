@@ -405,79 +405,72 @@ def control_generate_node(state: LLMState) -> LLMState:
     user_domain = user_data.get("domain", "Unknown").strip()
 
     model = get_llm()
-    system_prompt = f"""
-    You are a control generation specialist assisting users in creating ISO 27001 controls.
-    Your task is to generate relevant and effective controls based on the user's risk context and organizational details.
-    You have access to the following tools:
-    1. semantic_risk_search: Search the user's risk register to find relevant risks based on a query.
-    2. knowledge_base_search: Search an ISO 27001 knowledge base to find relevant control information.
+    system_prompt = f"""You are a control generation specialist assisting users in creating ISO 27001 controls.
 
-    USER CONTEXT:
-    - User ID: {user_id}
-    - Organization: {user_organization}
-    - Location: {user_location}
-    - Domain: {user_domain}
+USER CONTEXT:
+- User ID: {user_id}
+- Organization: {user_organization}  
+- Location: {user_location}
+- Domain: {user_domain}
 
-    Follow the PROCESS below to generate controls:
-    PROCESS:
-    1. Analyze the user's input and recent conversation history to understand their needs.
-    2. Determine if the user has provided a direct risk description or wants to search their risk register.
-       - If they want to search their register, use semantic_risk_search to find relevant risks.
-       - If a direct description is provided, do not call semantic_risk_search, directly generate controls for the given risk with linked_risk_ids: [] i.e. no risk id needed as the user has provided a description.
-    3. For each risk, generate controls that address the risk effectively.
-    4. Use knowledge_base_search to find relevant ISO 27001 control information to map the generated controls to Annex A.
-    5. Compile the generated controls into a JSON array with the following fields:    
-        1. control_title: Clear, specific control title
-        2. control_description: Detailed description of what this control addresses for this risk
-        3. objective: Business objective and purpose of the control
-        4. annexA_map: Array of relevant ISO 27001:2022 Annex A mappings with id and title
-        5. linked_risk_ids: Array containing the risk ID this control addresses
-        6. owner_role: Suggested role responsible for this control (e.g., "CISO", "IT Manager", "Security Officer")
-        7. process_steps: Array of 3-5 specific implementation steps
-        8. evidence_samples: Array of 3-5 examples of evidence/documentation for this control
-        9. metrics: Array of 2-4 measurable KPIs or metrics to track control effectiveness
-        10. frequency: How often the control is executed/reviewed (e.g., "Quarterly", "Monthly", "Annually")
-        11. policy_ref: Reference to related organizational policy
-        12. status: Set to "Planned" for new controls
-        13. rationale: Why this control is necessary for mitigating the specific risk
-        14. assumptions: Any assumptions made (can be empty string if none)
-    6. Ensure the ISO 27001 Annex A mappings are accurate and relevant.
-    7. Return the generated controls and the response text as STRICTLY JSON ONLY. No additional text. If no controls can be generated, return response_to_user with an explanation but still return valid JSON with an empty controls array. and follow the RESPONSE FORMAT below.
-**RESPOND IN STRICT JSON ONLY** NO EXTRA TEXT OUTSIDE THE JSON.
-JSON RESPONSE FORMAT:
+TOOLS AVAILABLE:
+1. semantic_risk_search: Search user's risk register for relevant risks
+2. knowledge_base_search: Search ISO 27001 knowledge base for control information
+
+PROCESS:
+1. Analyze user input to understand their control generation needs
+2. Determine risk source:
+   - If user wants to search their risk register → use semantic_risk_search
+   - If user provides direct risk description → skip search, use description directly
+3. For identified risks, generate appropriate controls
+4. Use knowledge_base_search to map controls to ISO 27001 Annex A
+5. Return results in the EXACT JSON format specified below
+
+CRITICAL: You MUST respond with ONLY valid JSON. No explanatory text before or after. No markdown code blocks. Just pure JSON.
+
+JSON OUTPUT FORMAT (REQUIRED):
 {{
-  "response_to_user": "...",
+  "response_to_user": "Brief explanation of what controls were generated and why",
   "controls": [
     {{
-      "control_title": "...",
-      "control_description": "...",
-      "objective": "...",
+      "control_title": "Clear, specific control title",
+      "control_description": "Detailed description addressing the specific risk",
+      "objective": "Business objective and purpose of this control",
       "annexA_map": [
-        {{"id": "A.X.Y", "title": "..."}}
+        {{"id": "A.X.Y", "title": "ISO 27001 Annex A control title"}}
       ],
-      "linked_risk_ids": [],
-      "owner_role": "...",
+      "linked_risk_ids": ["RISK-ID-123"],
+      "owner_role": "CISO|IT Manager|Security Officer|Data Protection Officer",
       "process_steps": [
-        "Step 1...",
-        "Step 2..."
+        "Specific implementation step 1",
+        "Specific implementation step 2",
+        "Specific implementation step 3"
       ],
       "evidence_samples": [
-        "Document 1...",
-        "Report 2..."
+        "Audit document or evidence example 1",
+        "Audit document or evidence example 2",
+        "Audit document or evidence example 3"
       ],
       "metrics": [
-        "Metric 1...",
-        "Metric 2..."
+        "Measurable KPI or metric 1",
+        "Measurable KPI or metric 2"
       ],
-      "frequency": "...",
-      "policy_ref": "...",
+      "frequency": "Monthly|Quarterly|Annually|Continuous",
+      "policy_ref": "Related organizational policy reference",
       "status": "Planned",
-      "rationale": "...",
-      "assumptions": ""
+      "rationale": "Why this control is necessary for the specific risk",
+      "assumptions": "Any assumptions made (or empty string)"
     }}
   ]
 }}
-"""
+
+IMPORTANT RULES:
+- Generate 2-4 controls per risk
+- linked_risk_ids should be empty array [] if user provided direct description
+- annexA_map must contain real ISO 27001 Annex A controls from knowledge base
+- All JSON fields are required (use empty string "" for optional text fields)
+- Response must be valid JSON that can be parsed by json.loads()
+- No text outside the JSON structure"""
 
     try:
         print(f"control_generate_node: user_id={user_id}, input_len={len(user_input)}")
@@ -555,65 +548,133 @@ JSON RESPONSE FORMAT:
 
         # add a control_id to each control in the format - CONTROL-<6 digit random number>
         def _extract_json(text: str) -> str:
-            """Attempt to extract a JSON object from arbitrary LLM text, handling code fences and extra text.
-            Returns a JSON string (best-effort) or raises ValueError if none can be found.
-            """
-            t = (text or "").strip()
-            # Strip code fences first
+            """Extract JSON from LLM response, handling various formats and cleaning up common issues."""
+            if not text:
+                raise ValueError("Empty response text")
+            
+            t = text.strip()
+            
+            # Remove markdown code blocks
             if t.startswith("```json") and t.endswith("```"):
-                return t[7:-3].strip()
-            if t.startswith("```") and t.endswith("```"):
-                return t[3:-3].strip()
-            # If the whole thing looks like JSON already
-            if t.startswith("{") and t.endswith("}"):
-                return t
-            # Try to find the first balanced JSON object
+                t = t[7:-3].strip()
+            elif t.startswith("```") and t.endswith("```"):
+                t = t[3:-3].strip()
+            
+            # Handle common LLM prefixes
+            prefixes_to_remove = [
+                "Here's the JSON response:",
+                "Here is the JSON:",
+                "JSON response:",
+                "Response:",
+            ]
+            for prefix in prefixes_to_remove:
+                if t.lower().startswith(prefix.lower()):
+                    t = t[len(prefix):].strip()
+            
+            # Find JSON object boundaries
             start = t.find("{")
             if start == -1:
-                raise ValueError("No JSON object start found")
+                raise ValueError("No JSON object found in response")
+            
+            # Find the matching closing brace
             depth = 0
             for i in range(start, len(t)):
-                ch = t[i]
-                if ch == '{':
+                if t[i] == '{':
                     depth += 1
-                elif ch == '}':
+                elif t[i] == '}':
                     depth -= 1
                     if depth == 0:
-                        return t[start:i+1]
-            raise ValueError("Unbalanced JSON braces in content")
+                        json_str = t[start:i+1]
+                        # Basic validation - try to parse it
+                        try:
+                            json.loads(json_str)
+                            return json_str
+                        except json.JSONDecodeError as e:
+                            raise ValueError(f"Invalid JSON structure: {e}")
+            
+            raise ValueError("Unbalanced JSON braces")
 
-        content = response_content.strip()
+        content = response_content.strip()        
         try:
             content = _extract_json(content)
-        except Exception:
-            # Keep original content for logging, but it will likely fail to parse
-            pass
-
-        print(f"Raw response content extracted: {content}")
+            print(f"Extracted JSON: {content[:200]}...")
+        except Exception as e:
+            print(f"JSON extraction failed: {e}")
+            # Try to use the original content as fallback
+            if not content.strip().startswith("{"):
+                # If it doesn't look like JSON at all, create a fallback response
+                fallback_response = {
+                    "response_to_user": content if content.strip() else "I apologize, but I couldn't generate controls in the proper format. Please try again with more specific details.",
+                    "controls": []
+                }
+                content = json.dumps(fallback_response)
 
         # Ensure defaults so we don't reference before assignment on error paths
         response_to_user = ""
         controls = []
         try:
             output = json.loads(content)
-            controls = output.get("controls", []) or []
-            response_to_user = output.get("response_to_user", "") or ""
-            for control in controls:
+            
+            # Validate the structure
+            if not isinstance(output, dict):
+                raise ValueError("Response must be a JSON object")
+            if "response_to_user" not in output:
+                output["response_to_user"] = "I've generated controls based on your request."
+            
+            if "controls" not in output:
+                output["controls"] = []
+            
+            controls = output.get("controls", [])
+            response_to_user = output.get("response_to_user", "")
+            
+            # Validate controls structure
+            if not isinstance(controls, list):
+                print("Warning: 'controls' field is not an array, converting to empty array")
+                controls = []
+            
+            # Add control IDs and validate each control
+            valid_controls = []
+            for i, control in enumerate(controls):
+                if not isinstance(control, dict):
+                    print(f"Warning: Control {i} is not an object, skipping")
+                    continue
+                
+                # Add required fields if missing
+                required_fields = [
+                    "control_title", "control_description", "objective", 
+                    "annexA_map", "linked_risk_ids", "owner_role", 
+                    "process_steps", "evidence_samples", "metrics", 
+                    "frequency", "policy_ref", "status", "rationale", "assumptions"
+                ]
+                
+                for field in required_fields:
+                    if field not in control:
+                        if field in ["annexA_map", "linked_risk_ids", "process_steps", "evidence_samples", "metrics"]:
+                            control[field] = []
+                        else:
+                            control[field] = ""
+                
+                # Add control ID
                 control["control_id"] = f"CONTROL-{random.randint(100000, 999999)}"
-            print(f"Parsed controls with IDs: {controls}")
-        except json.JSONDecodeError:
-            print("Failed to parse JSON from response content")
+                valid_controls.append(control)
+            
+            controls = valid_controls
+            print(f"Validated and processed {len(controls)} controls")
+            
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing failed: {e}")
+            print(f"Content that failed to parse: {content[:500]}...")
             state["control_generation_requested"] = False
-            # Preserve conversation, provide graceful fallback
             state["conversation_history"] = updated_history
-            fallback = response_to_user or "I couldn't generate controls based on the provided information. Please try rephrasing or providing more details."
+            fallback = "I encountered an issue generating the controls in the proper format. The response wasn't structured correctly. Please try again with more specific details about the risks you'd like controls for."
             state["output"] = fallback
             return state
+            
         except Exception as e:
-            print(f"Unexpected error parsing controls: {e}")
+            print(f"Unexpected error processing controls: {e}")
             state["control_generation_requested"] = False
             state["conversation_history"] = updated_history
-            fallback = response_to_user or "I couldn't generate controls based on the provided information. Please try rephrasing or providing more details."
+            fallback = f"I encountered an unexpected error while processing the controls: {str(e)}. Please try again."
             state["output"] = fallback
             return state
         
