@@ -28,50 +28,24 @@ def orchestrator_node(state: LLMState) -> LLMState:
     user_data = state.get("user_data", {})
     active_mode = state.get("active_mode", "")
     
-    # Deterministic prefilter BEFORE LLM
     user_text_lower = user_input.lower()
-    user_text_len = len(user_input)
+    system_prompt = load_prompt("orchestrator_router.txt")
+
+    try:
+        response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
+        routing_decision = response_content.strip().lower()
+    except Exception as e:
+        print(f"Error in orchestrator LLM call: {e}")
+        routing_decision = "knowledge_node"
     
-    # Stickiness check for short follow-ups in risk domain
-    follow_up_keywords = ["filter", "sort", "only", "add", "exclude"]
-    is_short_followup = user_text_len <= 80 and any(kw in user_text_lower for kw in follow_up_keywords)
-    
-    if active_mode.startswith("risk_") and is_short_followup:
-        routing_decision = "risk_node"
-    else:
-        # Deterministic keyword-based routing
-        audit_cues = ["audit", "auditor", "evidence", "audit plan"]
-        risk_cues = ["risk", "risk register", "matrix", "3x3", "4x4", "5x5", "likelihood", "impact", "categories", "generate"]
-        control_cues = ["control", "controls", "security control", "iso control", "annex a", "control library", "generate control", "create control", "implementation", "control framework"]
-        
-        if any(cue in user_text_lower for cue in audit_cues):
-            routing_decision = "audit_facilitator"
-        elif any(cue in user_text_lower for cue in control_cues):
-            routing_decision = "control_node"
-        elif any(cue in user_text_lower for cue in risk_cues):
-            routing_decision = "risk_node"
-        else:
-            # Use LLM for edge cases
-            system_prompt = load_prompt("orchestrator_router.txt")
-            
-            try:
-                response_content = make_llm_call_with_history(system_prompt, user_input, conversation_history)
-                routing_decision = response_content.strip().lower()
-            except Exception as e:
-                print(f"Error in orchestrator LLM call: {e}")
-                routing_decision = "knowledge_node"
-    
-    # Strict validation - accept only valid labels
     valid_labels = ["audit_facilitator", "risk_node", "control_node", "knowledge_node"]
     if routing_decision not in valid_labels:
-        # Fallback logic
-        if any(kw in user_text_lower for kw in ["control", "controls", "security control", "annex a"]):
+        if any(kw in user_text_lower for kw in ["control", "controls", "security control"]):
             routing_decision = "control_node"
         elif any(kw in user_text_lower for kw in ["risk", "matrix", "likelihood", "impact"]):
             routing_decision = "risk_node"
         else:
             routing_decision = "knowledge_node"
-    
     print(f"Orchestrator routing decision: {routing_decision}")
     
     # Set domain-level active_mode and routing flags

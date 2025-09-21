@@ -19,3 +19,8 @@ Example Output: "control_node"
 
 Example Input: "Tell me about A.9.2 from Annex A of ISO 27001."
 Example Output: "knowledge_node"
+
+Example Input: "Tell me about A.9.2"
+Example Output: "knowledge_node"
+
+Example Input: "Get me the controls mapped to A.9.2"
