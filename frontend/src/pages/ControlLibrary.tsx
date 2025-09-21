@@ -171,6 +171,9 @@ export const ControlLibrary: React.FC<ControlLibraryProps> = ({ onClose }) => {
   const sortedControls = [...filteredControls].sort((a, b) => {
     const aValue = a[sortBy];
     const bValue = b[sortBy];
+    if (aValue === undefined && bValue === undefined) return 0;
+    if (aValue === undefined) return sortOrder === "asc" ? 1 : -1;
+    if (bValue === undefined) return sortOrder === "asc" ? -1 : 1;
     
     if (aValue < bValue) return sortOrder === "asc" ? -1 : 1;
     if (aValue > bValue) return sortOrder === "asc" ? 1 : -1;
