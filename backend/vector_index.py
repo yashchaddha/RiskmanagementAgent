@@ -318,20 +318,21 @@ def _compose_control_sentence(
 
         # Enhanced LLM prompt for comprehensive control paragraph generation
         user_prompt = f"""
-Convert the following control data into a comprehensive, natural language paragraph suitable for semantic search.
+You will receive structured information about an internal control.
 
-Requirements:
-- Write a detailed paragraph that captures all the key control information
-- Use natural, flowing language that would be easy to search semantically
-- Include organization context, control details, implementation approach, and compliance mappings
-- Do not use bullet points or structured formats
-- Make it sound like a professional control description
-- Include ISO 27001 Annex A mappings if present
+Produce a single cohesive paragraph (2-3 sentences) that can be used for semantic search.
+The paragraph MUST:
+- Identify the organization context if provided (organization, location, domain).
+- Name the control and clearly describe what it does using the supplied description/objective.
+- Mention the accountable owner role and the control's current status when available.
+- Cite ISO/IEC 27001 Annex A mappings verbatim when present.
+- Reference linked risk identifiers when present.
+- Avoid bullet points or lists; respond with prose only and do not invent information.
 
 Control Data:
 {json.dumps(filtered_payload, indent=2, ensure_ascii=False)}
 
-Write only the paragraph, no other text or formatting:
+Return only the paragraph.
 """
 
         resp = llm.invoke([
@@ -361,39 +362,45 @@ Write only the paragraph, no other text or formatting:
         parts.append(f"located in {_v(location)}")
     if _v(domain):
         parts.append(f"operating in {_v(domain)} domain")
-    
-    org_context = ", ".join(parts) if parts else "Organization"
-    
+
+    org_context = ", ".join(parts) if parts else "The organization"
+
     control_title = _v(control.get("control_title"))
     control_desc = _v(control.get("control_description"))
     objective = _v(control.get("objective"))
-    
-    base = []
-    if control_title and control_desc:
-        base.append(f"{org_context} implements {control_title}: {control_desc}.")
-    elif control_title:
-        base.append(f"{org_context} implements {control_title}.")
-    elif control_desc:
-        base.append(f"{org_context} describes a control: {control_desc}.")
 
+    sentences = []
+
+    if control_title:
+        sentences.append(f"{org_context} implements the {control_title} control.")
+    else:
+        sentences.append(f"{org_context} maintains an information security control.")
+
+    if control_desc:
+        trimmed_desc = control_desc.strip().rstrip(".")
+        if trimmed_desc:
+            sentences.append(f"{trimmed_desc}.")
+
+    detail_clauses = []
     if objective:
-        base.append(f"The objective is to {objective.lower()}.")
-
-    # Optional concise attributes
+        detail_clauses.append(f"its objective is {objective.rstrip('.')}")
     owner = _v(control.get("owner_role"))
     if owner:
-        base.append(f"Owned by {owner}.")
+        detail_clauses.append(f"the control owner is {owner}")
     status = _v(control.get("status"))
     if status:
-        base.append(f"Current status: {status}.")
+        detail_clauses.append(f"it is currently {status.lower()}")
     annexa = _annexa_readable(control.get("annexa_mappings"))
     if annexa:
-        base.append(f"{annexa}.")
+        detail_clauses.append(f"{annexa}")
     linked = _v(control.get("linked_risk_ids"))
     if linked:
-        base.append(f"Addresses linked risks: {linked}.")
+        detail_clauses.append(f"it addresses linked risks: {linked}")
 
-    paragraph = " ".join(base).strip()
+    if detail_clauses:
+        sentences.append("; ".join(detail_clauses).rstrip('.') + ".")
+
+    paragraph = " ".join(sentences).strip()
     return paragraph if paragraph else (control_desc or control_title or org_context)
 
 class VectorIndexService:

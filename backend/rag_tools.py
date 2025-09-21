@@ -1,11 +1,80 @@
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
+import os
+import re
+
 from langchain_core.tools import tool
 from database import RiskProfileDatabaseService
-import os
-from langchain_core.tools import tool
 from langchain_openai import OpenAIEmbeddings
 from pymilvus import MilvusClient
-from typing import List, Dict, Any
+
+
+def _extract_annex_ids_from_text(text: Optional[str]) -> Set[str]:
+    if not text:
+        return set()
+    return {match.upper() for match in re.findall(r"A\.\d+(?:\.\d+)?", text, flags=re.IGNORECASE)}
+
+
+def _tokenize(text: str) -> Set[str]:
+    if not text:
+        return set()
+    return {token for token in re.findall(r"[a-z0-9]+", text.lower()) if token}
+
+
+def _rerank_control_results(query: str, results: List[Dict[str, Any]], filters: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    if not results:
+        return results
+
+    query_lower = (query or "").lower()
+    query_annex_ids = _extract_annex_ids_from_text(query)
+    query_tokens = _tokenize(query_lower)
+    filter_status = (filters or {}).get("status", "").lower()
+
+    for result in results:
+        similarity = float(result.get("similarity_score") or result.get("score") or 0.0)
+        boost = 0.0
+
+        annex_ids = _extract_annex_ids_from_text(result.get("annexa_mappings"))
+        if query_annex_ids and annex_ids:
+            matches = query_annex_ids.intersection(annex_ids)
+            if matches:
+                boost += 0.15 * len(matches)
+
+        status_value = (result.get("status") or "").lower()
+        if filter_status and status_value == filter_status:
+            boost += 0.05
+        else:
+            for status_term in ["active", "inactive", "under review", "deprecated", "draft"]:
+                if status_term in query_lower and status_value == status_term:
+                    boost += 0.05
+                    break
+
+        owner_role = (result.get("owner_role") or "").lower()
+        if owner_role and owner_role in query_lower:
+            boost += 0.05
+
+        linked_ids = result.get("linked_risk_ids") or ""
+        for token in re.split(r",|;", linked_ids):
+            rid = token.strip().lower()
+            if rid and rid in query_lower:
+                boost += 0.05
+                break
+
+        text_blob = " ".join(filter(None, [
+            result.get("summary"),
+            result.get("description"),
+            result.get("title"),
+            result.get("objective"),
+        ])).lower()
+        if text_blob:
+            overlap = len(query_tokens.intersection(_tokenize(text_blob)))
+            if overlap:
+                boost += min(0.05, overlap * 0.005)
+
+        result["score_boost"] = boost
+        result["reranked_score"] = similarity + boost
+
+    results.sort(key=lambda item: item.get("reranked_score", item.get("similarity_score", 0.0)), reverse=True)
+    return results
 
 @tool("get_risk_profiles")
 def get_risk_profiles(user_id: str) -> dict:
@@ -163,7 +232,7 @@ def knowledge_base_search(query: str, category: str = "all", top_k: int = 5) -> 
         if cat == "annex_a":
             filter_expr = "doc_id like 'A.%'"
         elif cat == "clauses":
-            filter_expr = "doc_id not like 'A.%'"
+            filter_expr = None
 
         print(f"[DEBUG] knowledge_base_search: query='{query}', category='{category}' -> resolved_cat='{cat}', filter='{filter_expr}'")
 
@@ -352,6 +421,7 @@ def semantic_control_search(query: str, user_id: str, filters: Optional[Dict[str
                     score = float(score) if score is not None else None
                 except Exception:
                     pass
+                similarity = score if score is not None else 0.0
                 hits.append({
                     "control_id": entity.get("control_id"),
                     "title": entity.get("control_title"),
@@ -362,9 +432,11 @@ def semantic_control_search(query: str, user_id: str, filters: Optional[Dict[str
                     "annexa_mappings": entity.get("annexa_mappings"),
                     "linked_risk_ids": entity.get("linked_risk_ids"),
                     "summary": entity.get("control_text"),
-                    "score": score
+                    "similarity_score": similarity,
+                    "score": similarity
                 })
-        print(f"🔍 semantic_control_search found {len(hits)} hits")
+        hits = _rerank_control_results(query, hits, filters)
+        print(f"🔍 semantic_control_search found {len(hits)} hits (post-rerank)")
         print(f"🔍 Returning hits: {hits}")
         return {"hits": hits, "count": len(hits), "query": query, "user_id": user_id}
     except Exception as e:

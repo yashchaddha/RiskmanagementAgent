@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 from pymongo import MongoClient
 from bson import ObjectId
 from uuid import uuid4
@@ -1252,6 +1252,120 @@ IMPORTANT: Return ONLY valid JSON. Do not include any other text."""
 
 class ControlDatabaseService:
     """Service for managing control entities"""
+
+    @staticmethod
+    def _format_annexa_mappings_for_vector(mappings: Optional[List[Any]]) -> str:
+        """Create a consistent string representation for Annex A mappings."""
+        formatted: List[str] = []
+        if not mappings:
+            return ""
+
+        for mapping in mappings:
+            item = mapping
+            # Support both dicts and pydantic objects
+            if hasattr(item, "dict"):
+                item = item.dict()
+            ann_id = str((item or {}).get("id", "")).strip()
+            title = str((item or {}).get("title", "")).strip()
+
+            if ann_id and title:
+                formatted.append(f"{ann_id} - {title}")
+            elif ann_id:
+                formatted.append(ann_id)
+            elif title:
+                formatted.append(title)
+
+        # Ensure deterministic ordering for reproducible embeddings
+        formatted = sorted({entry for entry in formatted if entry})
+        return "; ".join(formatted)
+
+    @staticmethod
+    def _format_linked_risk_ids_for_vector(linked_ids: Optional[List[Any]]) -> str:
+        """Normalize linked risk identifiers into a stable string."""
+        if not linked_ids:
+            return ""
+        cleaned = []
+        for value in linked_ids:
+            text = str(value).strip()
+            if text:
+                cleaned.append(text)
+        # Deduplicate while preserving order of first appearance
+        seen = set()
+        ordered = []
+        for item in cleaned:
+            if item not in seen:
+                seen.add(item)
+                ordered.append(item)
+        return ", ".join(ordered)
+
+    @staticmethod
+    def _prepare_vector_payload(user_doc: dict, control_source: Any) -> tuple[str, str, str, Dict[str, Any]]:
+        """Build the payload required by ControlVectorIndexService from Mongo records."""
+        org = str((user_doc or {}).get("organization_name", "") or "").strip()
+        location = str((user_doc or {}).get("location", "") or "").strip()
+        domain = str((user_doc or {}).get("domain", "") or "").strip()
+
+        source_data: Dict[str, Any]
+        if hasattr(control_source, "dict"):
+            source_data = control_source.dict()
+        elif isinstance(control_source, dict):
+            source_data = control_source
+        else:
+            # Fallback to attribute access for dataclass-like objects
+            source_data = {
+                "control_id": getattr(control_source, "control_id", ""),
+                "control_title": getattr(control_source, "control_title", ""),
+                "control_description": getattr(control_source, "control_description", ""),
+                "objective": getattr(control_source, "objective", ""),
+                "annexA_map": getattr(control_source, "annexA_map", []),
+                "owner_role": getattr(control_source, "owner_role", ""),
+                "status": getattr(control_source, "status", ""),
+                "linked_risk_ids": getattr(control_source, "linked_risk_ids", []),
+            }
+
+        annex_source = source_data.get("annexA_map")
+        if annex_source is None and source_data.get("annexa_mappings") is not None:
+            annexa_value = str(source_data.get("annexa_mappings") or "").strip()
+        else:
+            annexa_value = ControlDatabaseService._format_annexa_mappings_for_vector(annex_source)
+
+        linked_source = source_data.get("linked_risk_ids")
+        if isinstance(linked_source, str):
+            linked_value = linked_source.strip()
+        else:
+            linked_value = ControlDatabaseService._format_linked_risk_ids_for_vector(linked_source)
+
+        payload = {
+            "control_id": str(source_data.get("control_id", "") or "").strip(),
+            "control_title": str(source_data.get("control_title", "") or "").strip(),
+            "control_description": str(source_data.get("control_description", "") or "").strip(),
+            "objective": str(source_data.get("objective", "") or "").strip(),
+            "owner_role": str(source_data.get("owner_role", "") or "").strip(),
+            "status": str(source_data.get("status", "") or "").strip(),
+            "annexa_mappings": annexa_value,
+            "linked_risk_ids": linked_value,
+        }
+
+        return org, location, domain, payload
+
+    @staticmethod
+    def _sync_control_vector_entry(user_doc: dict, control_doc: dict, user_id: str) -> None:
+        """Push control changes to the vector index while shielding the main flow."""
+        if not control_doc:
+            return
+        try:
+            org, location, domain, payload = ControlDatabaseService._prepare_vector_payload(user_doc, control_doc)
+            if not payload.get("control_id"):
+                return
+            ControlVectorIndexService.upsert_finalized_controls(
+                user_id=user_id,
+                organization_name=org,
+                location=location,
+                domain=domain,
+                controls=[payload]
+            )
+        except Exception as exc:
+            print(f"Warning: Failed to sync control to vector index: {exc}")
     
     @staticmethod
     async def save_control(
@@ -1343,31 +1457,8 @@ class ControlDatabaseService:
             )
             
             # Add vector indexing after successful control creation
-            try:
-                # Convert Control model to dict for vector indexing
-                control_dict = {
-                    "control_id": control.control_id,
-                    "control_title": control.control_title,
-                    "control_description": control.control_description,
-                    "objective": control.objective,
-                    "annexa_mappings": ", ".join([
-                        f"{m.id}:{m.title}" if getattr(m, 'title', None) else f"{m.id}" for m in control.annexA_map
-                    ]) if control.annexA_map else "",
-                    "owner_role": control.owner_role,
-                    "status": control.status,
-                    "linked_risk_ids": ", ".join(control.linked_risk_ids) if control.linked_risk_ids else ""
-                }
-                
-                ControlVectorIndexService.upsert_finalized_controls(
-                    user_id=user_id,
-                    organization_name="",  # Empty - not needed
-                    location="",           # Empty - not needed  
-                    domain="",            # Empty - not needed
-                    controls=[control_dict]
-                )
-            except Exception as e:
-                print(f"Warning: Failed to index control in vector database: {e}")
-            
+            ControlDatabaseService._sync_control_vector_entry(user, inserted_doc, user_id)
+
             return ControlResponse(
                 success=True,
                 message="Control saved successfully",
@@ -1557,7 +1648,7 @@ class ControlDatabaseService:
                     control_description=updated_doc["control_description"],
                     objective=updated_doc["objective"],
                     annexA_map=[AnnexAMapping(**mapping) for mapping in updated_doc.get("annexA_map", [])],
-                    linked_risk_ids=[],  # Will be populated by actual risk objects in link function
+                    linked_risk_ids=updated_doc.get("linked_risk_ids", []),
                     owner_role=updated_doc["owner_role"],
                     process_steps=updated_doc.get("process_steps", []),
                     evidence_samples=updated_doc.get("evidence_samples", []),
@@ -1571,7 +1662,10 @@ class ControlDatabaseService:
                     created_at=updated_doc["created_at"],
                     updated_at=updated_doc["updated_at"]
                 )
-                
+
+                # Keep vector index in sync with control changes
+                ControlDatabaseService._sync_control_vector_entry(user, updated_doc, user_id)
+
                 return ControlResponse(
                     success=True,
                     message="Control updated successfully",
@@ -1715,6 +1809,8 @@ class ControlDatabaseService:
             )
             
             if result.modified_count > 0:
+                updated_doc = controls_collection.find_one({"_id": control_doc["_id"]})
+                ControlDatabaseService._sync_control_vector_entry(user, updated_doc, user_id)
                 return ControlResponse(
                     success=True,
                     message=f"Control linked to {len(valid_risk_ids)} risks successfully",
@@ -1843,6 +1939,8 @@ class ControlDatabaseService:
             )
             
             if result.modified_count > 0:
+                updated_doc = controls_collection.find_one({"_id": control_doc["_id"]})
+                ControlDatabaseService._sync_control_vector_entry(user, updated_doc, user_id)
                 return ControlResponse(
                     success=True,
                     message=f"Control status updated to {status}",
