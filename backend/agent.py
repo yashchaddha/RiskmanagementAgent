@@ -1,14 +1,14 @@
 import os
 from dotenv import load_dotenv
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from models import LLMState
 from dependencies import get_llm, make_llm_call_with_history
 from agents.risk_agent import risk_node, risk_generation_node, risk_register_node, matrix_recommendation_node, risk_knowledge_node
 from agents.control_agent import control_node, control_generate_node, control_library_node, control_knowledge_node
-from langgraph.prebuilt import create_react_agent
+# from langgraph.prebuilt import create_react_agent  # no longer used; migrated to bind_tools
 from langsmith import traceable
 from rag_tools import knowledge_base_search
 from prompt_utils import load_prompt
@@ -157,19 +157,62 @@ def knowledge_node(state: LLMState):
                 messages.append(AIMessage(content=turn["assistant"]))
         messages.append(HumanMessage(content=user_input))
 
-        # Use create_react_agent for simpler tool handling
-        agent = create_react_agent(
-            model=model,
-            tools=[knowledge_base_search]
-        )
+        # Use bind_tools deterministic tool-calling loop
+        tools_list = [knowledge_base_search]
+        llm = model.bind_tools(tools_list)
+        tool_registry = {t.name: t for t in tools_list}
 
-        result = agent.invoke({"messages": messages})
-        final_msg = result["messages"][-1]
-        final_text = getattr(final_msg, "content", getattr(final_msg, "text", "")) or (
-            "I'm specialized in ISO/IEC 27001:2022 compliance guidance. "
-            "Please ask me questions about information security management systems, "
-            "ISO 27001 clauses, Annex A controls, or related compliance topics."
-        )
+        MAX_TOOL_STEPS = 6
+        final_ai = None
+        for _ in range(MAX_TOOL_STEPS):
+            ai_msg = llm.invoke(messages)
+            messages.append(ai_msg)
+            final_ai = ai_msg
+
+            tool_calls = getattr(ai_msg, "tool_calls", None) or []
+            if not tool_calls:
+                break
+
+            for call in tool_calls:
+                tname = call.get("name")
+                if tname not in tool_registry:
+                    messages.append(ToolMessage(
+                        content=f'{{"error":"unknown_tool","name":"{tname}"}}',
+                        tool_call_id=call.get("id"),
+                    ))
+                    continue
+                try:
+                    result = tool_registry[tname].invoke(call.get("args", {}))
+                except Exception as e:
+                    result = {"error": str(e)}
+
+                import json as _json
+                payload = result if isinstance(result, str) else _json.dumps(result, ensure_ascii=False)
+                if len(payload) > 8000:
+                    payload = payload[:8000] + "…"
+
+                print(f"[DEBUG] Tool {tname} returned: {payload[:200]}...")
+
+                messages.append(ToolMessage(
+                    content=payload,
+                    tool_call_id=call.get("id"),
+                    name=tname,
+                ))
+
+        # Extract final text
+        final_text = ""
+        if final_ai and getattr(final_ai, "content", None):
+            if isinstance(final_ai.content, list):
+                final_text = " ".join(part.content if hasattr(part, "content") else str(part)
+                                      for part in final_ai.content if part)
+            else:
+                final_text = str(final_ai.content)
+        if not final_text.strip():
+            final_text = (
+                "I'm specialized in ISO/IEC 27001:2022 compliance guidance. "
+                "Please ask me questions about information security management systems, "
+                "ISO 27001 clauses, Annex A controls, or related compliance topics."
+            )
 
         updated_history = conversation_history + [{"user": user_input, "assistant": final_text}]
         

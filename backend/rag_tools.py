@@ -92,20 +92,85 @@ def knowledge_base_search(query: str, category: str = "all", top_k: int = 5) -> 
     try:
         emb = OpenAIEmbeddings(model="text-embedding-3-small")
         query_vec: List[float] = emb.embed_query(query)
+        
+        zilliz_uri = os.getenv("ZILLIZ_URI")
+        zilliz_token = os.getenv("ZILLIZ_TOKEN")
+        
+        if not zilliz_uri or not zilliz_token:
+            return {
+                "hits": [], 
+                "count": 0, 
+                "error": "Missing ZILLIZ_URI or ZILLIZ_TOKEN environment variables. Please configure your .env file.", 
+                "query": query, 
+                "category": category
+            }
+        
         client = MilvusClient(
-            uri=os.getenv("ZILLIZ_URI"),
-            token=os.getenv("ZILLIZ_TOKEN"),
+            uri=zilliz_uri,
+            token=zilliz_token,
             secure=True
         )
         
         OUTPUT_FIELDS = ["doc_id", "text"]
+
+        # Auto-infer category from query patterns if not specified or is "all"
+        cat = (category or "all").lower()
+        if cat == "all":
+            import re
+            query_lower = query.lower()
+            # Check for Annex A patterns
+            if (re.search(r'\ba\.\d+(?:\.\d+)?\b', query_lower) or 
+                'annex a' in query_lower or 
+                any(term in query_lower for term in ['control', 'cryptographic', 'access control', 'key management'])):
+                cat = "annex_a"
+            # Check for clause patterns  
+            elif (re.search(r'\bclause\s+\d+(?:\.\d+)?\b', query_lower) or
+                  any(term in query_lower for term in ['leadership', 'isms scope', 'planning', 'support'])):
+                cat = "clauses"
+
+        # Check if this is an exact ID lookup (e.g., "A.5.6", "A.8.24")
+        import re
+        exact_id_match = re.match(r'^A\.\d+(?:\.\d+)?$', query.strip())
         
-        # No filtering for now with simplified schema
+        if exact_id_match:
+            # For exact ID lookups, try direct query first
+            try:
+                direct_results = client.query(
+                    collection_name="iso_knowledge_index",
+                    filter=f"doc_id == '{query.strip()}'",
+                    output_fields=OUTPUT_FIELDS,
+                    limit=1
+                )
+                if direct_results:
+                    print(f"[DEBUG] Found exact match for {query.strip()}")
+                    return {
+                        "hits": [{
+                            "id": direct_results[0].get("doc_id"),
+                            "text": direct_results[0].get("text"),
+                            "score": 1.0  # Perfect match
+                        }],
+                        "count": 1,
+                        "query": query,
+                        "category": category
+                    }
+            except Exception as e:
+                print(f"[DEBUG] Direct lookup failed: {e}, falling back to semantic search")
+
+        # Apply filtering based on doc_id patterns from embeddings creation:
+        #  - Annex A domains/controls: "A.5", "A.8.24", etc.
+        #  - Clauses/subclauses: "4", "5.2", etc. (numeric, no 'A.' prefix)
         filter_expr = None
-        
+        if cat == "annex_a":
+            filter_expr = "doc_id like 'A.%'"
+        elif cat == "clauses":
+            filter_expr = "doc_id not like 'A.%'"
+
+        print(f"[DEBUG] knowledge_base_search: query='{query}', category='{category}' -> resolved_cat='{cat}', filter='{filter_expr}'")
+
         results = client.search(
             collection_name="iso_knowledge_index",
             data=[query_vec],
+            anns_field="embedding",
             limit=top_k,
             output_fields=OUTPUT_FIELDS,
             filter=filter_expr if filter_expr else None,
