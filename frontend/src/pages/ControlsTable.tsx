@@ -222,27 +222,17 @@ export const ControlsTable: React.FC<ControlsTableProps> = ({ controls, onClose,
                 <th>Linked Risks</th>
                 <th>Annex A</th>
                 <th>Owner</th>
-                <th>Process Steps</th>
                 <th>Evidence Samples</th>
-                <th>Metrics</th>
-                <th>Frequency</th>
-                <th>Policy Ref</th>
                 <th>Status</th>
-                <th>Rationale</th>
-                <th>Assumptions</th>
               </tr>
             </thead>
             <tbody>
               {localControls.map((c, idx) => {
                 const currentAnnexA = getControlFieldValue(c, 'annexA_map') as AnnexAMapping[];
-                const currentProcessSteps = getControlFieldValue(c, 'process_steps') as string[];
                 const currentEvidenceSamples = getControlFieldValue(c, 'evidence_samples') as string[];
-                const currentMetrics = getControlFieldValue(c, 'metrics') as string[];
 
                 const annexFull = Array.isArray(currentAnnexA) ? currentAnnexA.map((a) => `${a.id}${a.title ? `: ${a.title}` : ""}`).join("; ") : "";
-                const stepsFull = Array.isArray(currentProcessSteps) ? currentProcessSteps.join("; ") : "";
                 const evidenceFull = Array.isArray(currentEvidenceSamples) ? currentEvidenceSamples.join("; ") : "";
-                const metricsFull = Array.isArray(currentMetrics) ? currentMetrics.join("; ") : "";
 
                 return (
                   <tr key={c.control_id + idx}>
@@ -332,17 +322,6 @@ export const ControlsTable: React.FC<ControlsTableProps> = ({ controls, onClose,
                     </td>
                     <td>
                       <textarea
-                        className="editable-field cell-steps-input"
-                        value={stepsFull}
-                        onChange={(e) => {
-                          const steps = e.target.value ? e.target.value.split(';').map(s => s.trim()).filter(s => s) : [];
-                          updateControlField(c.control_id, 'process_steps', steps);
-                        }}
-                        rows={2}
-                      />
-                    </td>
-                    <td>
-                      <textarea
                         className="editable-field cell-evidence-input"
                         value={evidenceFull}
                         onChange={(e) => {
@@ -350,33 +329,6 @@ export const ControlsTable: React.FC<ControlsTableProps> = ({ controls, onClose,
                           updateControlField(c.control_id, 'evidence_samples', evidence);
                         }}
                         rows={2}
-                      />
-                    </td>
-                    <td>
-                      <textarea
-                        className="editable-field cell-metrics-input"
-                        value={metricsFull}
-                        onChange={(e) => {
-                          const metrics = e.target.value ? e.target.value.split(';').map(s => s.trim()).filter(s => s) : [];
-                          updateControlField(c.control_id, 'metrics', metrics);
-                        }}
-                        rows={2}
-                      />
-                    </td>
-                    <td>
-                      <input
-                        type="text"
-                        className="editable-field cell-frequency-input"
-                        value={getControlFieldValue(c, 'frequency') as string || ''}
-                        onChange={(e) => updateControlField(c.control_id, 'frequency', e.target.value)}
-                      />
-                    </td>
-                    <td>
-                      <input
-                        type="text"
-                        className="editable-field cell-policy-input"
-                        value={getControlFieldValue(c, 'policy_ref') as string || ''}
-                        onChange={(e) => updateControlField(c.control_id, 'policy_ref', e.target.value)}
                       />
                     </td>
                     <td>
@@ -391,22 +343,6 @@ export const ControlsTable: React.FC<ControlsTableProps> = ({ controls, onClose,
                         <option value="Under Review">Under Review</option>
                         <option value="Approved">Approved</option>
                       </select>
-                    </td>
-                    <td>
-                      <textarea
-                        className="editable-field cell-rationale-input"
-                        value={getControlFieldValue(c, 'rationale') as string || ''}
-                        onChange={(e) => updateControlField(c.control_id, 'rationale', e.target.value)}
-                        rows={2}
-                      />
-                    </td>
-                    <td>
-                      <textarea
-                        className="editable-field cell-assumptions-input"
-                        value={getControlFieldValue(c, 'assumptions') as string || ''}
-                        onChange={(e) => updateControlField(c.control_id, 'assumptions', e.target.value)}
-                        rows={2}
-                      />
                     </td>
                   </tr>
                 );

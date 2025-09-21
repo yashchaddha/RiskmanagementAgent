@@ -354,6 +354,84 @@ def semantic_risk_search(query: str, user_id: str, top_k: int = 5) -> dict:
     except Exception as e:
         return {"hits": [], "count": 0, "error": str(e), "query": query, "user_id": user_id}
 
+
+@tool("semantic_risk_search_simple")
+def semantic_risk_search_simple(query: str, user_id: str, top_k: int = 5) -> dict:
+    """
+    Semantically search the user's finalized risks stored in Zilliz/Milvus.
+    Returns a JSON payload of the top matches (with scores) filtered by user_id.
+
+    Args:
+        query: Free-text user query about risks.
+        user_id: Tenant scoping (strictly filter to this user).
+        top_k: Number of results to return.
+    """
+    try:
+        emb = OpenAIEmbeddings(model="text-embedding-3-small")
+        query_vec: List[float] = emb.embed_query(query)
+        client = MilvusClient(
+            uri=os.getenv("ZILLIZ_URI"),
+            token=os.getenv("ZILLIZ_TOKEN"),
+            secure=True
+        )
+        OUTPUT_FIELDS = ["risk_text"]
+        expr = f"user_id == '{user_id}'"
+
+        print(f"🔍 semantic_risk_search: query='{query}', user_id='{user_id}', top_k={top_k}")
+        results = client.search(
+            collection_name="finalized_risks_index",
+            data=[query_vec],
+            anns_field="embedding",
+            limit=top_k,
+            output_fields=OUTPUT_FIELDS,
+            filter=expr,
+        )
+
+        hits: List[Dict[str, Any]] = []
+        if results and len(results) > 0:
+            for hit in results[0]:
+                entity = hit.get("entity", {}) if isinstance(hit, dict) else getattr(hit, "entity", {})
+                score = hit.get("score", None) if isinstance(hit, dict) else getattr(hit, "score", None)
+                try:
+                    score = float(score) if score is not None else None
+                except Exception:
+                    pass
+
+                hits.append({
+                    "risk_id": entity.get("risk_id"),
+                    "score": score,
+                    "user_id": entity.get("user_id"),
+                    "organization_name": entity.get("organization_name"),
+                    "location": entity.get("location"),
+                    "domain": entity.get("domain"),
+                    "category": entity.get("category"),
+                    "description": entity.get("description"),
+                    "likelihood": entity.get("likelihood"),
+                    "impact": entity.get("impact"),
+                    "treatment_strategy": entity.get("treatment_strategy"),
+                    "department": entity.get("department"),
+                    "risk_owner": entity.get("risk_owner"),
+                    "asset_value": entity.get("asset_value"),
+                    "security_impact": entity.get("security_impact"),
+                    "target_date": entity.get("target_date"),
+                    "risk_progress": entity.get("risk_progress"),
+                    "residual_exposure": entity.get("residual_exposure"),
+                    "risk_text": entity.get("risk_text"),
+                })
+
+        print(f"🔍 semantic_risk_search found {len(hits)} hits")
+        print(f"🔍 Returning hits: {hits}")
+
+        return {
+            "hits": hits,
+            "count": len(hits),
+            "query": query,
+            "user_id": user_id
+        }
+
+    except Exception as e:
+        return {"hits": [], "count": 0, "error": str(e), "query": query, "user_id": user_id}
+
 @tool("semantic_control_search")
 def semantic_control_search(query: str, user_id: str, filters: Optional[Dict[str, str]] = None, top_k: int = 5) -> dict:
     """
@@ -387,15 +465,33 @@ def semantic_control_search(query: str, user_id: str, filters: Optional[Dict[str
         filter_exp = f"user_id == '{user_id}'"
         if filters:
             for field, value in filters.items():
+                if not value or not value.strip():
+                    continue
+                values = [v.strip() for v in value.split(',') if v.strip()]
+                if not values:
+                    continue
+                
                 if field == "annexa_mappings":
                     # Use LIKE for partial matching on annex mappings
-                    filter_exp += f" && annexa_mappings like '%{value}%'"
+                    if len(values) == 1:
+                        filter_exp += f" && annexa_mappings like '%{values[0]}%'"
+                    else:
+                        like_conditions = [f"annexa_mappings like '%{v}%'" for v in values]
+                        filter_exp += f" && ({' || '.join(like_conditions)})"
                 elif field == "linked_risk_ids":
                     # Use LIKE for partial matching on linked risk IDs
-                    filter_exp += f" && linked_risk_ids like '%{value}%'"
+                    if len(values) == 1:
+                        filter_exp += f" && linked_risk_ids like '%{values[0]}%'"
+                    else:
+                        like_conditions = [f"linked_risk_ids like '%{v}%'" for v in values]
+                        filter_exp += f" && ({' || '.join(like_conditions)})"
                 else:
                     # Exact match for other fields
-                    filter_exp += f" && {field} == '{value}'"
+                    if len(values) == 1:
+                        filter_exp += f" && {field} == '{values[0]}'"
+                    else:
+                        quoted_values = [f"'{v}'" for v in values]
+                        filter_exp += f" && {field} in [{','.join(quoted_values)}]"
         # Only fetch allowed fields from the controls schema
         OUTPUT_FIELDS = [
             "control_id", "control_title", "control_description", "objective", "owner_role", "status", "annexa_mappings", "linked_risk_ids", "control_text", "user_id"

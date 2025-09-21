@@ -113,16 +113,18 @@ def control_node(state: LLMState) -> LLMState:
 
 @traceable(project_name=LANGSMITH_PROJECT_NAME, name="control_library_node")
 def control_library_node(state: LLMState) -> LLMState:
-    """Conversational control library assistant for searching and managing user's controls (tool-calling version)."""
+    """Enhanced control library assistant with improved complex query handling."""
     print("Control Library Node Activated")
 
     user_input = state.get("input", "") or ""
     user_data = state.get("user_data", {}) or {}
     conversation_history = state.get("conversation_history", []) or []
     user_id = user_data.get("username") or user_data.get("user_id") or ""
-    search_intent_prompt = load_prompt("control_library_assistant.txt", {"user_id": user_id})
+    
+    # Load the enhanced comprehensive prompt
+    search_intent_prompt = load_prompt("control_library_assistant_enhanced.txt", {"user_id": user_id})
 
-    # 1) Build messages (keep context tight)
+    # Build messages (keep context tight)
     messages = [SystemMessage(content=search_intent_prompt)]
     recent_history = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
     for ex in recent_history:
@@ -132,19 +134,19 @@ def control_library_node(state: LLMState) -> LLMState:
             messages.append(AIMessage(content=ex["assistant"]))
     messages.append(HumanMessage(content=user_input))
 
-    # 2) Bind tools directly (predictable tool-calling; small prompt)
+    # Bind tools and set up registry
     model = get_llm()
     tools_list = [semantic_control_search, semantic_risk_search]
-
-
     llm = model.bind_tools(tools_list)
     tool_registry = {t.name: t for t in tools_list}
 
-    # 3) Small deterministic loop (no planner). The model decides tools; we execute them.
-    MAX_TOOL_STEPS = 6
+    # Enhanced tool execution loop with better error handling and context tracking
+    MAX_TOOL_STEPS = 8  # Increased for complex queries
     final_ai = None
+    risk_context = {}  # Store risk search results for context
+    
     try:
-        for _ in range(MAX_TOOL_STEPS):
+        for step in range(MAX_TOOL_STEPS):
             ai_msg = llm.invoke(messages)
             messages.append(ai_msg)
             final_ai = ai_msg
@@ -155,28 +157,46 @@ def control_library_node(state: LLMState) -> LLMState:
 
             for call in tool_calls:
                 tname = call.get("name")
+                call_args = call.get("args", {})
+                
                 if tname not in tool_registry:
-                    # Return a tool error back to the model
                     messages.append(ToolMessage(
                         content=f'{{"error":"unknown_tool","name":"{tname}"}}',
                         tool_call_id=call.get("id"),
                     ))
                     continue
 
-                # Execute tool with model-proposed args
+                # Execute tool with enhanced error handling
                 try:
-                    result = tool_registry[tname].invoke(call.get("args", {}))
+                    # Ensure user_id is always included
+                    if "user_id" not in call_args:
+                        call_args["user_id"] = user_id
+                    
+                    print(f"🔧 Executing {tname} with args: {call_args}")
+                    result = tool_registry[tname].invoke(call_args)
+                    
+                    # Store risk search results for potential use in control searches
+                    if tname == "semantic_risk_search" and isinstance(result, dict) and result.get("hits"):
+                        risk_ids = [hit.get("id") for hit in result["hits"] if hit.get("id")]
+                        if risk_ids:
+                            risk_context["found_risk_ids"] = risk_ids[:5]  # Limit to top 5
+                            print(f"🎯 Stored risk context: {len(risk_ids)} risk IDs")
+                    
                 except Exception as e:
-                    result = {"error": str(e)}
+                    print(f"❌ Tool execution error for {tname}: {str(e)}")
+                    result = {"error": f"Tool execution failed: {str(e)}", "args_used": call_args}
 
-                # IMPORTANT: return compact JSON/string to the model
+                # Prepare response payload
                 import json
-                payload = result
-                if not isinstance(payload, str):
-                    payload = json.dumps(payload, ensure_ascii=False)
-                # Optional: hard cap payload size if a tool misbehaves
-                if len(payload) > 8000:
-                    payload = payload[:8000] + "…"
+                if isinstance(result, str):
+                    payload = result
+                else:
+                    # Add risk context hint for the model if we have stored risk IDs
+                    if tname == "semantic_control_search" and risk_context.get("found_risk_ids"):
+                        if isinstance(result, dict) and not result.get("error"):
+                            result["_context"] = f"Previous risk search found {len(risk_context['found_risk_ids'])} relevant risks"
+                    
+                    payload = json.dumps(result, ensure_ascii=False)
 
                 messages.append(ToolMessage(
                     content=payload,
@@ -194,74 +214,10 @@ def control_library_node(state: LLMState) -> LLMState:
                 final_text = str(final_ai.content)
 
         if not final_text.strip():
-            # Try to synthesize an answer directly from the latest tool results
-            # Prefer the most recent semantic_control_search or fetch_controls_by_id output
-            latest_tool_payload = None
-            latest_tool_name = None
-            for m in reversed(messages):
-                if isinstance(m, ToolMessage) and isinstance(m.content, str):
-                    latest_tool_payload = m.content
-                    latest_tool_name = getattr(m, "name", None)
-                    # Use the most recent tool result
-                    break
-
-            synthesized_text = ""
-            if latest_tool_payload:
-                try:
-                    parsed = json.loads(latest_tool_payload)
-                    # Handle shortlist from semantic_control_search
-                    if isinstance(parsed, dict) and parsed.get("hits"):
-                        hits = parsed.get("hits", [])
-                        if hits:
-                            top = hits[:3]
-                            lines = []
-                            for h in top:
-                                cid = h.get("control_id") or h.get("id")
-                                title = h.get("title") or h.get("control_title")
-                                summary = h.get("summary") or h.get("control_text") or h.get("description")
-                                if summary:
-                                    summary = (summary.replace("\n", " ").strip())
-                                    if len(summary) > 180:
-                                        summary = summary[:180] + "…"
-                                line = f"• {cid}: {title} — {summary}" if (cid and title) else None
-                                if line:
-                                    lines.append(line)
-                            if lines:
-                                synthesized_text = (
-                                    "Here are the top controls I found:\n" + "\n".join(lines)
-                                )
-                    # Handle detailed fetch_controls_by_id response
-                    if not synthesized_text and isinstance(parsed, dict) and parsed.get("controls"):
-                        ctrls = parsed.get("controls", [])
-                        if ctrls:
-                            top = ctrls[:3]
-                            lines = []
-                            for c in top:
-                                cid = c.get("control_id")
-                                title = c.get("title") or c.get("control_title")
-                                desc = c.get("description") or c.get("control_description")
-                                if desc:
-                                    desc = (desc.replace("\n", " ").strip())
-                                    if len(desc) > 180:
-                                        desc = desc[:180] + "…"
-                                line = f"• {cid}: {title} — {desc}" if (cid and title) else None
-                                if line:
-                                    lines.append(line)
-                            if lines:
-                                synthesized_text = (
-                                    "Here are the top matching controls:\n" + "\n".join(lines)
-                                )
-                except Exception:
-                    # If parsing fails, fall back to default message below
-                    pass
-
-            if synthesized_text:
-                final_text = synthesized_text
-            else:
-                final_text = (
-                    "I’ve opened your control library. Try: “find controls for Annex A.8.30” "
-                    "or “list top controls mapped to data breach risks.”"
-                )
+            final_text = (
+                "I’ve opened your control library. Try: “find controls for Annex A.8.30” "
+                "or “list top controls mapped to data breach risks.”"
+            )
 
         updated_history = conversation_history + [{"user": user_input, "assistant": final_text}]
         return {
@@ -441,25 +397,12 @@ JSON OUTPUT FORMAT (REQUIRED):
       ],
       "linked_risk_ids": ["RISK-ID-123"],
       "owner_role": "CISO|IT Manager|Security Officer|Data Protection Officer",
-      "process_steps": [
-        "Specific implementation step 1",
-        "Specific implementation step 2",
-        "Specific implementation step 3"
-      ],
       "evidence_samples": [
         "Audit document or evidence example 1",
         "Audit document or evidence example 2",
         "Audit document or evidence example 3"
       ],
-      "metrics": [
-        "Measurable KPI or metric 1",
-        "Measurable KPI or metric 2"
-      ],
-      "frequency": "Monthly|Quarterly|Annually|Continuous",
-      "policy_ref": "Related organizational policy reference",
       "status": "Planned",
-      "rationale": "Why this control is necessary for the specific risk",
-      "assumptions": "Any assumptions made (or empty string)"
     }}
   ]
 }}

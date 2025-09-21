@@ -378,11 +378,7 @@ export const ControlLibrary: React.FC<ControlLibraryProps> = ({ onClose }) => {
                       Owner {sortBy === "owner_role" && (sortOrder === "asc" ? "↑" : "↓")}
                     </th>
                     <th>Annex A</th>
-                    <th>Process Steps</th>
                     <th>Evidence</th>
-                    <th>Metrics</th>
-                    <th>Frequency</th>
-                    <th>Policy Ref</th>
                     <th 
                       className="sortable" 
                       onClick={() => handleSort("created_at")}
@@ -396,14 +392,8 @@ export const ControlLibrary: React.FC<ControlLibraryProps> = ({ onClose }) => {
                     const annexFull = Array.isArray(control.annexA_map) 
                       ? control.annexA_map.map((a) => `${a.id}${a.title ? `: ${a.title}` : ""}`).join("; ") 
                       : "";
-                    const stepsFull = Array.isArray(control.process_steps) 
-                      ? control.process_steps.join("; ") 
-                      : "";
                     const evidenceFull = Array.isArray(control.evidence_samples) 
                       ? control.evidence_samples.join("; ") 
-                      : "";
-                    const metricsFull = Array.isArray(control.metrics) 
-                      ? control.metrics.join("; ") 
                       : "";
 
                     return (
@@ -458,28 +448,8 @@ export const ControlLibrary: React.FC<ControlLibraryProps> = ({ onClose }) => {
                           </div>
                         </td>
                         <td>
-                          <div className="clamp tooltip cell-steps" title={stepsFull}>
-                            {stepsFull || "-"}
-                          </div>
-                        </td>
-                        <td>
                           <div className="clamp tooltip cell-evidence" title={evidenceFull}>
                             {evidenceFull || "-"}
-                          </div>
-                        </td>
-                        <td>
-                          <div className="clamp tooltip cell-metrics" title={metricsFull}>
-                            {metricsFull || "-"}
-                          </div>
-                        </td>
-                        <td>
-                          <div className="clamp tooltip cell-frequency" title={control.frequency}>
-                            {control.frequency || "-"}
-                          </div>
-                        </td>
-                        <td>
-                          <div className="clamp tooltip cell-policy" title={control.policy_ref}>
-                            {control.policy_ref || "-"}
                           </div>
                         </td>
                         <td>
