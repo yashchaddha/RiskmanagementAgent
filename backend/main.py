@@ -1,14 +1,25 @@
+import logging
+
 from fastapi import FastAPI, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from auth import router as auth_router, get_current_user
+from audit import router as audit_router
 from agent import run_agent
 from helper import get_finalized_risks_summary
-from database import RiskDatabaseService, RiskProfileDatabaseService, ControlDatabaseService
+from database import (
+    RiskDatabaseService,
+    RiskProfileDatabaseService,
+    ControlDatabaseService,
+    init_mongo_connection,
+)
+from rag_tools import init_vector_clients
 from models import FinalizedRisk, Risk, GeneratedRisks, RiskResponse, FinalizedRisks, FinalizedRisksResponse, Control, ControlResponse, ControlsResponse, AnnexAMapping
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
 app = FastAPI(title="Risk Management Agent API", version="1.0.0")
+
+logger = logging.getLogger(__name__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,6 +30,17 @@ app.add_middleware(
 )
 
 app.include_router(auth_router, prefix="/auth")
+app.include_router(audit_router)
+
+
+@app.on_event("startup")
+async def startup_verify_mongo() -> None:
+    try:
+        init_mongo_connection()
+        init_vector_clients()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Startup dependency initialisation failed")
+        raise
 
 class ChatRequest(BaseModel):
     message: str

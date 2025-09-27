@@ -38,11 +38,29 @@ interface Risk {
   residualExposure?: "High" | "Medium" | "Low" | "Ongoing Mitigation";
 }
 
+interface AuditProgressSummary {
+  total?: number;
+  pending?: number;
+  answered?: number;
+  skipped?: number;
+  all_completed?: boolean;
+}
+
+interface AuditNextItem {
+  iso_reference?: string;
+  title?: string;
+  section_title?: string;
+  status?: string;
+}
+
 interface RiskContext {
   organization?: string;
   industry?: string;
   risk_areas?: string[];
   compliance_requirements?: string[];
+  audit?: AuditProgressSummary;
+  audit_next_item?: AuditNextItem;
+  audit_complete?: boolean;
 }
 
 interface ChatTurn {
@@ -218,10 +236,18 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const [isFinalizingRisks, setIsFinalizingRisks] = useState(false);
   const [showControlsTable, setShowControlsTable] = useState(false);
   const [showControlLibrary, setShowControlLibrary] = useState(false);
-  const [generatedControls, setGeneratedControls] = useState<ControlItem[]>([]);
-  const [isSavingControls, setIsSavingControls] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const [animateMessageId, setAnimateMessageId] = useState<string | null>(null);
+    const [generatedControls, setGeneratedControls] = useState<ControlItem[]>([]);
+    const [isSavingControls, setIsSavingControls] = useState(false);
+    const messagesEndRef = useRef<HTMLDivElement>(null);
+    const [animateMessageId, setAnimateMessageId] = useState<string | null>(null);
+
+    const auditProgress = riskContext?.audit;
+    const auditNextItem = riskContext?.audit_next_item;
+    const auditComplete = Boolean(riskContext?.audit_complete || auditProgress?.all_completed);
+    const answeredCount = auditProgress?.answered ?? 0;
+    const pendingCount = auditProgress?.pending ?? 0;
+    const skippedCount = auditProgress?.skipped ?? 0;
+    const totalCount = auditProgress?.total ?? answeredCount + pendingCount + skippedCount;
 
   // Note: latestBotMessageId no longer used; animation is controlled by animateMessageId
 
@@ -1077,6 +1103,51 @@ Please try again or contact support if the issue persists.`,
           matrixData={matrixPreviewData}
           onApplyMatrix={handleApplyMatrix}
         />
+      )}
+
+      {auditProgress && (
+        <div className="audit-status-card">
+          <div className="audit-status-top">
+            <span className="audit-status-title">Audit Facilitator</span>
+            <span className={`audit-status-badge ${auditComplete ? "complete" : "in-progress"}`}>
+              {auditComplete ? "Complete" : "In Progress"}
+            </span>
+          </div>
+          <div className="audit-status-metrics">
+            <span>
+              <strong>{answeredCount}</strong> answered
+            </span>
+            <span>
+              <strong>{pendingCount}</strong> pending
+            </span>
+            <span>
+              <strong>{skippedCount}</strong> skipped
+            </span>
+            <span>
+              <strong>{totalCount}</strong> total
+            </span>
+          </div>
+          {!auditComplete && auditNextItem?.iso_reference && (
+            <div className="audit-next-clause">
+              <span className="audit-next-label">Next clause</span>
+              <span className="audit-next-value">
+                {auditNextItem.iso_reference}
+                {auditNextItem.title ? ` — ${auditNextItem.title}` : ""}
+              </span>
+            </div>
+          )}
+          {!auditComplete && skippedCount > 0 && (
+            <p className="audit-skip-note">
+              {skippedCount === 1 ? "1 clause is skipped" : `${skippedCount} clauses are skipped`}
+              {" "}— complete them before finishing the assessment.
+            </p>
+          )}
+          {auditComplete && (
+            <p className="audit-complete-note">
+              Great work—the audit checklist is complete. Ask Nexi to generate risks whenever you're ready.
+            </p>
+          )}
+        </div>
       )}
 
       <div className="quick-actions">

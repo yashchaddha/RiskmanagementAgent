@@ -71,27 +71,45 @@ def signup(user: UserCreate):
     
     # Create default risk profiles for the new user and get their IDs
     try:
-        from database import RiskProfileDatabaseService
+        from database import RiskProfileDatabaseService, AuditDatabaseService
         import asyncio
-        
-        # Create event loop for async operation
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(RiskProfileDatabaseService.create_default_risk_profiles(user.username))
-        loop.close()
-        
-        if result.success and result.data and result.data.get("profile_ids"):
-            # Update user with the risk profile IDs
-            profile_ids = result.data.get("profile_ids", [])
+        try:
+            profile_result = loop.run_until_complete(
+                RiskProfileDatabaseService.create_default_risk_profiles(user.username)
+            )
+            audit_result = loop.run_until_complete(
+                AuditDatabaseService.create_user_audit_items(user.username)
+            )
+        finally:
+            loop.close()
+
+        if profile_result.success and profile_result.data and profile_result.data.get("profile_ids"):
+            profile_ids = profile_result.data.get("profile_ids", [])
             users_collection.update_one(
                 {"username": user.username},
                 {"$set": {"risks_applicable": profile_ids}}
             )
             print(f"Successfully created {len(profile_ids)} risk profiles for user {user.username}")
         else:
-            print(f"Warning: Failed to create default risk profiles for user {user.username}: {result.message}")
+            print(
+                f"Warning: Failed to create default risk profiles for user {user.username}: {profile_result.message}"
+            )
+
+        if audit_result.success:
+            created_total = audit_result.data.get("created") if isinstance(audit_result.data, dict) else None
+            print(
+                f"Successfully initialized audit clauses for user {user.username}" +
+                (f" ({created_total} items)" if created_total else "")
+            )
+        else:
+            print(
+                f"Warning: Failed to initialize audit clauses for user {user.username}: {audit_result.message}"
+            )
     except Exception as e:
-        print(f"Warning: Error creating default risk profiles for user {user.username}: {str(e)}")
+        print(f"Warning: Error during post-signup initialization for user {user.username}: {str(e)}")
     
     access_token = create_access_token({"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}

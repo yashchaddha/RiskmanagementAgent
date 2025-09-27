@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import List, Optional, TypedDict
+from pydantic import BaseModel, Field
+from typing import List, Optional, TypedDict, Dict, Any
 from datetime import datetime
 
 class LLMState(TypedDict):
@@ -22,6 +22,10 @@ class LLMState(TypedDict):
     control_parameters: dict  # Parameters for control operations
     # Additional context fields used by control generation
     risk_description: str  # Raw risk description text when mode = risk_description
+    # Audit facilitator state
+    audit_session_active: bool  # Indicates active audit facilitator session
+    audit_context: Dict[str, Any]  # Stores current audit item context
+    audit_progress: Dict[str, Any]  # Summary counts for audit progress
 
 class Risk(BaseModel):
     id: Optional[str] = None
@@ -96,6 +100,68 @@ class FinalizedRisksResponse(BaseModel):
 class AnnexAMapping(BaseModel):
     id: str
     title: str 
+
+class AuditEvidence(BaseModel):
+    id: str
+    file_name: str
+    file_size: int
+    content_type: str
+    bucket: str
+    object_key: str
+    uploaded_by: str
+    uploaded_at: datetime
+    version_id: Optional[str] = None
+    checksum: Optional[str] = None
+    url: Optional[str] = None
+
+
+class AuditItem(BaseModel):
+    id: Optional[str] = None
+    item_id: str
+    user_id: str
+    type: str  # clause | annex
+    iso_reference: str
+    section: str
+    section_title: str
+    title: str
+    description: Optional[str] = None
+    parent_reference: Optional[str] = None
+    parent_title: Optional[str] = None
+    order_index: int
+    status: str = "pending"  # pending | answered | skipped
+    answer: Optional[str] = None
+    answer_updated_at: Optional[datetime] = None
+    skipped_at: Optional[datetime] = None
+    evidences: List[AuditEvidence] = Field(default_factory=list)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class AuditProgress(BaseModel):
+    total: int
+    pending: int
+    answered: int
+    skipped: int
+
+
+class AuditItemResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[AuditItem] = None
+
+
+class AuditItemsResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[List[AuditItem]] = None
+    progress: Optional[AuditProgress] = None
+
+
+class AuditProgressResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[AuditProgress] = None
+
 
 class Control(BaseModel):
     id: Optional[str] = None

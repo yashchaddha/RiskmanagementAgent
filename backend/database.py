@@ -1,11 +1,34 @@
+import logging
 import os
+import re
 from datetime import datetime
-from typing import List, Optional, Any, Dict
-from pymongo import MongoClient
+from typing import List, Optional, Any, Dict, Tuple
+
+import boto3
+from botocore.exceptions import ClientError
+from pymongo import MongoClient, ReturnDocument
 from bson import ObjectId
 from uuid import uuid4
+
 from vector_index import VectorIndexService, ControlVectorIndexService 
-from models import Risk, GeneratedRisks, RiskResponse, FinalizedRisk, FinalizedRisks, FinalizedRisksResponse, Control, ControlResponse, ControlsResponse, AnnexAMapping
+from models import (
+    Risk,
+    GeneratedRisks,
+    RiskResponse,
+    FinalizedRisk,
+    FinalizedRisks,
+    FinalizedRisksResponse,
+    Control,
+    ControlResponse,
+    ControlsResponse,
+    AnnexAMapping,
+    AuditItem,
+    AuditEvidence,
+    AuditProgress,
+)
+from knowledge_base import ISO_27001_KNOWLEDGE
+
+logger = logging.getLogger(__name__)
 
 # Database result wrapper class
 class DatabaseResult:
@@ -16,7 +39,9 @@ class DatabaseResult:
 
 # MongoDB connection
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-client = MongoClient(MONGODB_URI)
+MONGODB_TIMEOUT_MS = int(os.getenv("MONGODB_TIMEOUT_MS", "5000"))
+
+client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=MONGODB_TIMEOUT_MS)
 db = client.isoriskagent
 
 # Collections
@@ -25,6 +50,24 @@ finalized_risks_collection = db.finalized_risks
 users_collection = db.users
 risk_profiles_collection = db.risk_profiles
 controls_collection = db.controls
+audit_items_collection = db.user_audit_items
+
+AWS_REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+AWS_S3_ENDPOINT_URL = os.getenv("AWS_S3_ENDPOINT_URL")
+AUDIT_EVIDENCE_BUCKET = os.getenv("AUDIT_EVIDENCE_BUCKET")
+AUDIT_EVIDENCE_PREFIX = os.getenv("AUDIT_EVIDENCE_PREFIX", "audit-evidence")
+AUDIT_EVIDENCE_MAX_BYTES = int(os.getenv("AUDIT_EVIDENCE_MAX_BYTES", str(100 * 1024 * 1024)))
+
+
+def init_mongo_connection() -> None:
+    """Ensure MongoDB connection is established during application startup."""
+    try:
+        client.admin.command("ping")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to connect to MongoDB at startup", exc_info=exc)
+        raise
+    else:
+        logger.info("MongoDB connection verified successfully")
 
 def _to_str_id(obj):
     if isinstance(obj, dict):
@@ -34,6 +77,450 @@ def _to_str_id(obj):
     if isinstance(obj, ObjectId):
         return str(obj)
     return obj
+
+
+class S3EvidenceStorage:
+    """Minimal S3 wrapper for audit evidence management."""
+
+    _client = None
+
+    @classmethod
+    def _get_client(cls):
+        if cls._client is not None:
+            return cls._client
+        if not AUDIT_EVIDENCE_BUCKET:
+            raise RuntimeError("AUDIT_EVIDENCE_BUCKET environment variable is not configured")
+
+        client_kwargs: Dict[str, Any] = {}
+        if AWS_REGION:
+            client_kwargs["region_name"] = AWS_REGION
+        if AWS_S3_ENDPOINT_URL:
+            client_kwargs["endpoint_url"] = AWS_S3_ENDPOINT_URL
+
+        cls._client = boto3.client("s3", **client_kwargs)
+        return cls._client
+
+    @staticmethod
+    def _sanitize_filename(filename: str) -> str:
+        base_name = os.path.basename(filename or "")
+        sanitized = re.sub(r"[^A-Za-z0-9._-]", "_", base_name)
+        return sanitized or "evidence"
+
+    @classmethod
+    def build_object_key(cls, user_id: str, item_id: str, filename: str) -> str:
+        safe_name = cls._sanitize_filename(filename)
+        return f"{AUDIT_EVIDENCE_PREFIX}/{user_id}/{item_id}/{uuid4()}_{safe_name}"
+
+    @classmethod
+    def upload_fileobj(
+        cls,
+        file_obj,
+        *,
+        user_id: str,
+        item_id: str,
+        filename: str,
+        content_type: Optional[str] = None,
+        extra_args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, Optional[str]]:
+        client = cls._get_client()
+        object_key = cls.build_object_key(user_id, item_id, filename)
+        upload_args = extra_args.copy() if extra_args else {}
+        if content_type:
+            upload_args.setdefault("ContentType", content_type)
+
+        try:
+            if upload_args:
+                client.upload_fileobj(file_obj, AUDIT_EVIDENCE_BUCKET, object_key, ExtraArgs=upload_args)
+            else:
+                client.upload_fileobj(file_obj, AUDIT_EVIDENCE_BUCKET, object_key)
+        except ClientError as exc:
+            raise RuntimeError(f"Failed to upload evidence to S3: {exc}") from exc
+
+        version_id = None
+        if client.can_paginate("list_object_versions"):
+            # Optionally capture version ID when bucket versioning is enabled
+            try:
+                response = client.head_object(Bucket=AUDIT_EVIDENCE_BUCKET, Key=object_key)
+                version_id = response.get("VersionId")
+            except ClientError:
+                version_id = None
+
+        return object_key, version_id
+
+    @classmethod
+    def delete_object(cls, object_key: str) -> None:
+        if not object_key:
+            return
+        client = cls._get_client()
+        try:
+            client.delete_object(Bucket=AUDIT_EVIDENCE_BUCKET, Key=object_key)
+        except ClientError as exc:
+            raise RuntimeError(f"Failed to delete evidence from S3: {exc}") from exc
+
+
+class AuditTemplateService:
+    """Provides ISO 27001 clause and annex templates for new users."""
+
+    CLAUSES_KEY = "Clauses"
+    ANNEX_KEY = "Annex_A"
+
+    @classmethod
+    def build_iso_27001_templates(cls) -> List[Dict[str, Any]]:
+        iso_data = ISO_27001_KNOWLEDGE.get("ISO27001_2022", {})
+        clause_sections = iso_data.get(cls.CLAUSES_KEY, []) or []
+
+        templates: List[Dict[str, Any]] = []
+        order_index = 1
+
+        for clause in clause_sections:
+            section = clause.get("id", "")
+            section_title = clause.get("title", section)
+            clause_description = clause.get("description", "")
+            subclauses = clause.get("subclauses", []) or []
+
+            if subclauses:
+                for sub in subclauses:
+                    iso_reference = sub.get("id") or section
+                    templates.append({
+                        "type": "clause",
+                        "iso_reference": iso_reference,
+                        "section": section,
+                        "section_title": section_title,
+                        "title": sub.get("title", section_title),
+                        "description": sub.get("description", clause_description),
+                        "parent_reference": section,
+                        "parent_title": section_title,
+                        "order_index": order_index,
+                    })
+                    order_index += 1
+            else:
+                templates.append({
+                    "type": "clause",
+                    "iso_reference": section,
+                    "section": section,
+                    "section_title": section_title,
+                    "title": section_title,
+                    "description": clause_description,
+                    "parent_reference": None,
+                    "parent_title": None,
+                    "order_index": order_index,
+                })
+                order_index += 1
+
+        return templates
+
+
+class AuditDatabaseService:
+    """Database helpers for user-specific audit clauses and annexes."""
+
+    VALID_STATUSES = {"pending", "answered", "skipped"}
+
+    @staticmethod
+    def _document_to_model(doc: Dict[str, Any]) -> Optional[AuditItem]:
+        if not doc:
+            return None
+
+        hydrated = dict(doc)
+        hydrated["id"] = str(hydrated.pop("_id", ""))
+        hydrated = _to_str_id(hydrated)
+
+        evidences = hydrated.get("evidences", []) or []
+        hydrated["evidences"] = [AuditEvidence(**e) if not isinstance(e, AuditEvidence) else e for e in evidences]
+
+        return AuditItem(**hydrated)
+
+    @staticmethod
+    async def create_user_audit_items(user_id: str) -> DatabaseResult:
+        if not user_id:
+            return DatabaseResult(False, "user_id is required to create audit items")
+
+        existing = audit_items_collection.count_documents({"user_id": user_id})
+        if existing:
+            return DatabaseResult(
+                True,
+                f"Audit items already initialized for user {user_id}",
+                {"total": existing, "created": 0}
+            )
+
+        templates = AuditTemplateService.build_iso_27001_templates()
+        if not templates:
+            return DatabaseResult(False, "No ISO 27001 templates available to seed audit items")
+
+        now = datetime.utcnow()
+        documents = []
+        for template in templates:
+            documents.append({
+                "_id": ObjectId(),
+                "item_id": str(uuid4()),
+                "user_id": user_id,
+                "type": template.get("type", "clause"),
+                "iso_reference": template.get("iso_reference"),
+                "section": template.get("section"),
+                "section_title": template.get("section_title"),
+                "title": template.get("title"),
+                "description": template.get("description"),
+                "parent_reference": template.get("parent_reference"),
+                "parent_title": template.get("parent_title"),
+                "order_index": template.get("order_index", 0),
+                "status": "pending",
+                "answer": None,
+                "answer_updated_at": None,
+                "skipped_at": None,
+                "evidences": [],
+                "created_at": now,
+                "updated_at": now,
+            })
+
+        try:
+            audit_items_collection.insert_many(documents, ordered=True)
+        except Exception as exc:
+            return DatabaseResult(False, f"Failed to initialize audit items: {exc}")
+
+        return DatabaseResult(
+            True,
+            f"Created {len(documents)} audit items for user {user_id}",
+            {"total": len(documents), "created": len(documents)}
+        )
+
+    @staticmethod
+    def get_progress_summary(user_id: str) -> DatabaseResult:
+        query = {"user_id": user_id}
+        total = audit_items_collection.count_documents(query)
+
+        if total == 0:
+            progress = AuditProgress(total=0, pending=0, answered=0, skipped=0)
+            return DatabaseResult(True, "No audit items found for user", progress)
+
+        answered = audit_items_collection.count_documents({**query, "status": "answered"})
+        skipped = audit_items_collection.count_documents({**query, "status": "skipped"})
+        pending = max(total - answered - skipped, 0)
+
+        progress = AuditProgress(
+            total=total,
+            pending=pending,
+            answered=answered,
+            skipped=skipped,
+        )
+        return DatabaseResult(True, "Audit progress summary retrieved", progress)
+
+    @staticmethod
+    async def get_audit_items(
+        user_id: str,
+        status: Optional[str] = None,
+        limit: int = 50,
+        skip: int = 0,
+    ) -> DatabaseResult:
+        query: Dict[str, Any] = {"user_id": user_id}
+        if status:
+            if status not in AuditDatabaseService.VALID_STATUSES:
+                return DatabaseResult(False, f"Invalid status filter: {status}")
+            query["status"] = status
+
+        cursor = (
+            audit_items_collection
+            .find(query)
+            .sort("order_index", 1)
+            .skip(max(skip, 0))
+            .limit(max(limit, 1))
+        )
+
+        items = [AuditDatabaseService._document_to_model(doc) for doc in cursor]
+        progress_result = AuditDatabaseService.get_progress_summary(user_id)
+
+        data = {
+            "items": items,
+            "progress": progress_result.data if progress_result.success else None,
+        }
+        return DatabaseResult(True, "Audit items fetched successfully", data)
+
+    @staticmethod
+    def get_next_actionable_item(user_id: str) -> DatabaseResult:
+        pending_doc = audit_items_collection.find_one(
+            {"user_id": user_id, "status": "pending"},
+            sort=[("order_index", 1)]
+        )
+        if not pending_doc:
+            pending_doc = audit_items_collection.find_one(
+                {"user_id": user_id, "status": "skipped"},
+                sort=[("order_index", 1)]
+            )
+
+        if not pending_doc:
+            return DatabaseResult(True, "All audit items completed", None)
+
+        item = AuditDatabaseService._document_to_model(pending_doc)
+        return DatabaseResult(True, "Next audit item retrieved", item)
+
+    @staticmethod
+    async def submit_answer(user_id: str, item_id: str, answer: str) -> DatabaseResult:
+        trimmed_answer = answer.strip() if answer else None
+        now = datetime.utcnow()
+
+        updated = audit_items_collection.find_one_and_update(
+            {"user_id": user_id, "item_id": item_id},
+            {
+                "$set": {
+                    "answer": trimmed_answer,
+                    "status": "answered" if trimmed_answer else "pending",
+                    "answer_updated_at": now if trimmed_answer else None,
+                    "skipped_at": None,
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+
+        if not updated:
+            return DatabaseResult(False, f"Audit item {item_id} not found for user {user_id}")
+
+        item = AuditDatabaseService._document_to_model(updated)
+        return DatabaseResult(True, "Audit answer captured", item)
+
+    @staticmethod
+    async def mark_skipped(user_id: str, item_id: str) -> DatabaseResult:
+        now = datetime.utcnow()
+
+        updated = audit_items_collection.find_one_and_update(
+            {"user_id": user_id, "item_id": item_id},
+            {
+                "$set": {
+                    "status": "skipped",
+                    "skipped_at": now,
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+
+        if not updated:
+            return DatabaseResult(False, f"Audit item {item_id} not found for user {user_id}")
+
+        item = AuditDatabaseService._document_to_model(updated)
+        return DatabaseResult(True, "Audit item marked as skipped", item)
+
+    @staticmethod
+    async def reset_to_pending(user_id: str, item_id: str) -> DatabaseResult:
+        now = datetime.utcnow()
+
+        updated = audit_items_collection.find_one_and_update(
+            {"user_id": user_id, "item_id": item_id},
+            {
+                "$set": {
+                    "status": "pending",
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+
+        if not updated:
+            return DatabaseResult(False, f"Audit item {item_id} not found for user {user_id}")
+
+        item = AuditDatabaseService._document_to_model(updated)
+        return DatabaseResult(True, "Audit item reset to pending", item)
+
+    @staticmethod
+    async def delete_item(user_id: str, item_id: str) -> DatabaseResult:
+        document = audit_items_collection.find_one({"user_id": user_id, "item_id": item_id})
+        if not document:
+            return DatabaseResult(False, f"Audit item {item_id} not found for user {user_id}")
+
+        errors: List[str] = []
+        evidences = document.get("evidences", []) or []
+        for evidence in evidences:
+            try:
+                S3EvidenceStorage.delete_object(evidence.get("object_key"))
+            except Exception as exc:  # noqa: BLE001 - must continue deletions
+                errors.append(str(exc))
+
+        audit_items_collection.delete_one({"_id": document["_id"]})
+
+        if errors:
+            return DatabaseResult(
+                True,
+                "Audit item removed, but some evidence files could not be deleted",
+                {"errors": errors}
+            )
+
+        return DatabaseResult(True, "Audit item removed successfully")
+
+    @staticmethod
+    async def append_evidence(
+        user_id: str,
+        item_id: str,
+        *,
+        file_name: str,
+        file_size: int,
+        content_type: Optional[str],
+        object_key: str,
+        uploaded_by: str,
+        checksum: Optional[str] = None,
+        version_id: Optional[str] = None,
+        bucket: Optional[str] = None,
+    ) -> DatabaseResult:
+        if file_size > AUDIT_EVIDENCE_MAX_BYTES:
+            max_mb = AUDIT_EVIDENCE_MAX_BYTES // (1024 * 1024)
+            return DatabaseResult(False, f"Evidence exceeds maximum size of {max_mb} MB")
+
+        evidence_record = {
+            "id": str(uuid4()),
+            "file_name": file_name,
+            "file_size": file_size,
+            "content_type": content_type,
+            "bucket": bucket or AUDIT_EVIDENCE_BUCKET,
+            "object_key": object_key,
+            "uploaded_by": uploaded_by,
+            "uploaded_at": datetime.utcnow(),
+            "checksum": checksum,
+            "version_id": version_id,
+        }
+
+        updated = audit_items_collection.find_one_and_update(
+            {"user_id": user_id, "item_id": item_id},
+            {
+                "$push": {"evidences": evidence_record},
+                "$set": {"updated_at": datetime.utcnow()},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+
+        if not updated:
+            return DatabaseResult(False, f"Audit item {item_id} not found for user {user_id}")
+
+        item = AuditDatabaseService._document_to_model(updated)
+        return DatabaseResult(True, "Evidence metadata stored", item)
+
+    @staticmethod
+    async def remove_evidence(user_id: str, item_id: str, evidence_id: str) -> DatabaseResult:
+        document = audit_items_collection.find_one({"user_id": user_id, "item_id": item_id})
+        if not document:
+            return DatabaseResult(False, f"Audit item {item_id} not found for user {user_id}")
+
+        evidences = document.get("evidences", []) or []
+        evidence = next((ev for ev in evidences if ev.get("id") == evidence_id), None)
+        if not evidence:
+            return DatabaseResult(False, f"Evidence {evidence_id} not found on audit item {item_id}")
+
+        try:
+            S3EvidenceStorage.delete_object(evidence.get("object_key"))
+        except Exception as exc:  # noqa: BLE001
+            return DatabaseResult(False, f"Failed to delete evidence object: {exc}")
+
+        updated = audit_items_collection.find_one_and_update(
+            {"user_id": user_id, "item_id": item_id},
+            {
+                "$pull": {"evidences": {"id": evidence_id}},
+                "$set": {"updated_at": datetime.utcnow()},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+
+        if not updated:
+            return DatabaseResult(False, f"Audit item {item_id} not found for user {user_id}")
+
+        item = AuditDatabaseService._document_to_model(updated)
+        return DatabaseResult(True, "Evidence removed", item)
+
 
 class RiskDatabaseService:
     @staticmethod

@@ -1,11 +1,51 @@
-from typing import Optional, Dict, Any, List, Set
+import logging
 import os
 import re
+from typing import Optional, Dict, Any, List, Set
 
 from langchain_core.tools import tool
 from database import RiskProfileDatabaseService
 from langchain_openai import OpenAIEmbeddings
 from pymilvus import MilvusClient
+
+
+logger = logging.getLogger(__name__)
+
+_MILVUS_CLIENT: Optional[MilvusClient] = None
+
+
+def init_vector_clients() -> None:
+    """Initialise global Milvus/Zilliz client once at startup."""
+    global _MILVUS_CLIENT
+
+    if _MILVUS_CLIENT is not None:
+        return
+
+    zilliz_uri = os.getenv("ZILLIZ_URI")
+    zilliz_token = os.getenv("ZILLIZ_TOKEN")
+
+    if not zilliz_uri or not zilliz_token:
+        logger.warning("ZILLIZ connection not configured; vector search tools will be disabled")
+        return
+
+    try:
+        _MILVUS_CLIENT = MilvusClient(
+            uri=zilliz_uri,
+            token=zilliz_token,
+            secure=True,
+        )
+        logger.info("Connected to Zilliz/Milvus at startup")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to initialise Milvus client", exc_info=exc)
+        raise
+
+
+def get_milvus_client() -> Optional[MilvusClient]:
+    """Return shared Milvus client, initialising lazily if needed."""
+    global _MILVUS_CLIENT
+    if _MILVUS_CLIENT is None:
+        init_vector_clients()
+    return _MILVUS_CLIENT
 
 
 def _extract_annex_ids_from_text(text: Optional[str]) -> Set[str]:
@@ -162,10 +202,9 @@ def knowledge_base_search(query: str, category: str = "all", top_k: int = 5) -> 
         emb = OpenAIEmbeddings(model="text-embedding-3-small")
         query_vec: List[float] = emb.embed_query(query)
         
-        zilliz_uri = os.getenv("ZILLIZ_URI")
-        zilliz_token = os.getenv("ZILLIZ_TOKEN")
-        
-        if not zilliz_uri or not zilliz_token:
+        client = get_milvus_client()
+
+        if client is None:
             return {
                 "hits": [], 
                 "count": 0, 
@@ -173,13 +212,7 @@ def knowledge_base_search(query: str, category: str = "all", top_k: int = 5) -> 
                 "query": query, 
                 "category": category
             }
-        
-        client = MilvusClient(
-            uri=zilliz_uri,
-            token=zilliz_token,
-            secure=True
-        )
-        
+
         OUTPUT_FIELDS = ["doc_id", "text"]
 
         # Auto-infer category from query patterns if not specified or is "all"
@@ -286,11 +319,16 @@ def semantic_risk_search(query: str, user_id: str, top_k: int = 5) -> dict:
     try:
         emb = OpenAIEmbeddings(model="text-embedding-3-small")
         query_vec: List[float] = emb.embed_query(query)
-        client = MilvusClient(
-            uri=os.getenv("ZILLIZ_URI"),
-            token=os.getenv("ZILLIZ_TOKEN"),
-            secure=True
-        )
+        client = get_milvus_client()
+
+        if client is None:
+            return {
+                "hits": [],
+                "count": 0,
+                "error": "Vector index not configured",
+                "query": query,
+                "user_id": user_id,
+            }
         OUTPUT_FIELDS = [
             "risk_id", "user_id", "organization_name", "location", "domain", 
             "category", "description", "likelihood", "impact", "treatment_strategy",
@@ -369,11 +407,16 @@ def semantic_risk_search_simple(query: str, user_id: str, top_k: int = 5) -> dic
     try:
         emb = OpenAIEmbeddings(model="text-embedding-3-small")
         query_vec: List[float] = emb.embed_query(query)
-        client = MilvusClient(
-            uri=os.getenv("ZILLIZ_URI"),
-            token=os.getenv("ZILLIZ_TOKEN"),
-            secure=True
-        )
+        client = get_milvus_client()
+
+        if client is None:
+            return {
+                "hits": [],
+                "count": 0,
+                "error": "Vector index not configured",
+                "query": query,
+                "user_id": user_id,
+            }
         OUTPUT_FIELDS = ["risk_text"]
         expr = f"user_id == '{user_id}'"
 
@@ -455,11 +498,16 @@ def semantic_control_search(query: str, user_id: str, filters: Optional[Dict[str
         emb = OpenAIEmbeddings(model="text-embedding-3-small")
         qv: List[float] = emb.embed_query(query)
 
-        client = MilvusClient(
-            uri=os.getenv("ZILLIZ_URI"),
-            token=os.getenv("ZILLIZ_TOKEN"),
-            secure=True
-        )
+        client = get_milvus_client()
+        if client is None:
+            return {
+                "hits": [],
+                "count": 0,
+                "error": "Vector index not configured",
+                "query": query,
+                "user_id": user_id,
+                "filters": filters,
+            }
         
         # Build filter expression using Milvus scalar filtering
         filter_exp = f"user_id == '{user_id}'"
@@ -562,11 +610,16 @@ def fetch_controls_by_id(query: str, user_id: str, linked_risk_ids: Optional[str
         emb = OpenAIEmbeddings(model="text-embedding-3-small")
         qv: List[float] = emb.embed_query(query)
 
-        client = MilvusClient(
-            uri=os.getenv("ZILLIZ_URI"),
-            token=os.getenv("ZILLIZ_TOKEN"),
-            secure=True
-        )
+        client = get_milvus_client()
+        if client is None:
+            return {
+                "hits": [],
+                "count": 0,
+                "error": "Vector index not configured",
+                "query": query,
+                "user_id": user_id,
+                "linked_risk_ids": linked_risk_ids,
+            }
         filter_exp = f"user_id == '{user_id}'"
         if linked_risk_ids and linked_risk_ids.strip():
             filter_exp += f" && linked_risk_ids like '%{linked_risk_ids.strip()}%'"

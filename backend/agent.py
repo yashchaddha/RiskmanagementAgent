@@ -1,6 +1,5 @@
 import os
 from dotenv import load_dotenv
-from langchain.schema import HumanMessage, AIMessage, SystemMessage
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -8,6 +7,7 @@ from models import LLMState
 from dependencies import get_llm, make_llm_call_with_history
 from agents.risk_agent import risk_node, risk_generation_node, risk_register_node, matrix_recommendation_node, risk_knowledge_node
 from agents.control_agent import control_node, control_generate_node, control_library_node, control_knowledge_node
+from agents.audit_agent import audit_facilitator_node
 # from langgraph.prebuilt import create_react_agent  # no longer used; migrated to bind_tools
 from langsmith import traceable
 from rag_tools import knowledge_base_search
@@ -27,7 +27,9 @@ def orchestrator_node(state: LLMState) -> LLMState:
     risk_context["generated_controls"] = []
     user_data = state.get("user_data", {})
     active_mode = state.get("active_mode", "")
-    
+    audit_context = state.get("audit_context", {}) or {}
+    audit_progress = state.get("audit_progress", {}) or {}
+
     user_text_lower = user_input.lower()
     system_prompt = load_prompt("orchestrator_router.txt")
 
@@ -49,13 +51,20 @@ def orchestrator_node(state: LLMState) -> LLMState:
     print(f"Orchestrator routing decision: {routing_decision}")
     
     # Set domain-level active_mode and routing flags
+    base_state = {
+        "input": state["input"],
+        "output": "",
+        "conversation_history": conversation_history,
+        "risk_context": risk_context,
+        "user_data": user_data,
+        "control_parameters": state.get("control_parameters", {}),
+        "audit_context": audit_context,
+        "audit_progress": audit_progress,
+    }
+
     if routing_decision == "audit_facilitator":
         return {
-            "input": state["input"],
-            "output": "",
-            "conversation_history": conversation_history,
-            "risk_context": risk_context,
-            "user_data": user_data,
+            **base_state,
             "active_mode": "audit_facilitator",
             "risk_generation_requested": False,
             "risk_register_requested": False,
@@ -67,15 +76,11 @@ def orchestrator_node(state: LLMState) -> LLMState:
             "generated_controls": [],
             "is_control_related": False,
             "control_target": "",
-            "control_parameters": {}
+            "audit_session_active": True,
         }
     elif routing_decision == "risk_node":
         return {
-            "input": state["input"],
-            "output": "",
-            "conversation_history": conversation_history,
-            "risk_context": risk_context,
-            "user_data": user_data,
+            **base_state,
             "active_mode": "risk_node",
             "risk_generation_requested": False,
             "risk_register_requested": False,
@@ -87,15 +92,11 @@ def orchestrator_node(state: LLMState) -> LLMState:
             "generated_controls": [],
             "is_control_related": False,
             "control_target": "",
-            "control_parameters": {}
+            "audit_session_active": False,
         }
     elif routing_decision == "control_node":
         return {
-            "input": state["input"],
-            "output": "",
-            "conversation_history": conversation_history,
-            "risk_context": risk_context,
-            "user_data": user_data,
+            **base_state,
             "active_mode": "control_node",
             "risk_generation_requested": False,
             "risk_register_requested": False,
@@ -107,15 +108,11 @@ def orchestrator_node(state: LLMState) -> LLMState:
             "generated_controls": [],
             "is_control_related": True,
             "control_target": "",
-            "control_parameters": {}
+            "audit_session_active": False,
         }
     else:  # knowledge_node
         return {
-            "input": state["input"],
-            "output": "",
-            "conversation_history": conversation_history,
-            "risk_context": risk_context,
-            "user_data": user_data,
+            **base_state,
             "active_mode": "knowledge_node",
             "risk_generation_requested": False,
             "risk_register_requested": False,
@@ -127,7 +124,7 @@ def orchestrator_node(state: LLMState) -> LLMState:
             "generated_controls": [],
             "is_control_related": False,
             "control_target": "",
-            "control_parameters": {}
+            "audit_session_active": False,
         }
 
 def knowledge_node(state: LLMState):
@@ -251,6 +248,7 @@ builder.add_node("risk_register", risk_register_node)
 builder.add_node("matrix_recommendation", matrix_recommendation_node)
 builder.add_node("knowledge_node", knowledge_node)
 builder.add_node("risk_knowledge_node", risk_knowledge_node)
+builder.add_node("audit_facilitator_node", audit_facilitator_node)
 # Control nodes
 builder.add_node("control_node", control_node)
 builder.add_node("generate_control_node", control_generate_node)
@@ -261,7 +259,7 @@ builder.set_entry_point("orchestrator")
 # Add conditional routing from orchestrator (two-level funnel)
 def orchestrator_routing(state: LLMState) -> str:
     if state.get("is_audit_related", False):
-        return "risk_node"  # Temporary routing to risk_node until audit_facilitator is implemented
+        return "audit_facilitator_node"
     elif state.get("is_control_related", False):
         return "control_node"
     elif state.get("is_risk_related", False):
@@ -286,7 +284,8 @@ def should_generate_risks(state: LLMState) -> str:
 builder.add_conditional_edges("orchestrator", orchestrator_routing, {
     "knowledge_node": "knowledge_node",  # Route to knowledge node for ISO 27001 related queries
     "risk_node": "risk_node",  # Route to risk sub-router for all risk-related queries
-    "control_node": "control_node"  # Route to control sub-router for all control-related queries
+    "control_node": "control_node",  # Route to control sub-router for all control-related queries
+    "audit_facilitator_node": "audit_facilitator_node",
 })
 
 def route_control_three_way(state: LLMState) -> str:
@@ -325,6 +324,7 @@ builder.add_edge("risk_register", END)
 builder.add_edge("matrix_recommendation", END)
 builder.add_edge("knowledge_node", END)
 builder.add_edge("risk_knowledge_node", END)
+builder.add_edge("audit_facilitator_node", END)
 
 # Add control routing conditional edges
 builder.add_conditional_edges("control_node", route_control_three_way, {
@@ -366,7 +366,10 @@ def run_agent(message: str, conversation_history: list = None, risk_context: dic
         "control_generation_requested": False,
         "is_control_related": False,
         "control_target": "",
-        "control_parameters": {}
+        "control_parameters": {},
+        "audit_session_active": False,
+        "audit_context": {},
+        "audit_progress": {}
     }
     
     # Use thread_id for memory persistence within the session
