@@ -26,6 +26,11 @@ class LLMState(TypedDict):
     audit_session_active: bool  # Indicates active audit facilitator session
     audit_context: Dict[str, Any]  # Stores current audit item context
     audit_progress: Dict[str, Any]  # Summary counts for audit progress
+    audit_phase: str  # Current audit phase: clauses | annexes
+    audit_clause_progress: Dict[str, Any]  # Clause-specific progress details
+    audit_annex_progress: Dict[str, Any]  # Annex-specific progress details
+    assistant_actions: List[Dict[str, Any]]  # UI actions emitted by assistant
+    awaiting_audit_answer: bool  # True when the facilitator is waiting for a clause answer
 
 class Risk(BaseModel):
     id: Optional[str] = None
@@ -127,8 +132,11 @@ class AuditItem(BaseModel):
     description: Optional[str] = None
     parent_reference: Optional[str] = None
     parent_title: Optional[str] = None
+    annex_group: Optional[str] = None
     order_index: int
-    status: str = "pending"  # pending | answered | skipped
+    status: str = "pending"  # pending | answered | skipped | excluded
+    excluded: bool = False
+    excluded_at: Optional[datetime] = None
     answer: Optional[str] = None
     answer_updated_at: Optional[datetime] = None
     skipped_at: Optional[datetime] = None
@@ -142,6 +150,19 @@ class AuditProgress(BaseModel):
     pending: int
     answered: int
     skipped: int
+
+
+class AuditTypeProgress(BaseModel):
+    total: int
+    pending: int
+    answered: int
+    skipped: int
+    excluded: int
+
+
+class AuditPhaseProgress(BaseModel):
+    clauses: AuditTypeProgress
+    annexes: AuditTypeProgress
 
 
 class AuditItemResponse(BaseModel):

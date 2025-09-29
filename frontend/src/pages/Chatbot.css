@@ -512,3 +512,234 @@
 .chat-messages::-webkit-scrollbar-thumb:hover {
   background: #a8a8a8;
 } 
+
+.audit-answer-button {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.9rem;
+  border: none;
+  border-radius: 8px;
+  background: #1f6feb;
+  color: #ffffff;
+  font-size: 0.92rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+.audit-answer-button:hover {
+  background: #1c64d9;
+  box-shadow: 0 8px 18px rgba(31, 111, 235, 0.28);
+}
+
+.audit-answer-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.audit-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 24, 39, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1.5rem;
+}
+
+.audit-modal {
+  background: #ffffff;
+  border-radius: 16px;
+  width: min(560px, 100%);
+  box-shadow: 0 28px 48px rgba(15, 23, 42, 0.28);
+  border: 1px solid rgba(226, 232, 240, 0.6);
+  display: flex;
+  flex-direction: column;
+}
+
+.audit-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.25rem 1.5rem 0.5rem;
+}
+
+.audit-modal-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.audit-modal-close {
+  background: transparent;
+  border: none;
+  color: #475569;
+  font-size: 1.6rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.audit-modal-close:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.audit-modal-body {
+  padding: 0.25rem 1.5rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.audit-modal-clause {
+  margin: 0;
+  font-weight: 600;
+  color: #1f2937;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.audit-modal-clause-ref {
+  font-size: 0.95rem;
+  color: #2563eb;
+}
+
+.audit-modal-clause-title {
+  font-size: 1rem;
+  color: #0f172a;
+}
+
+.audit-modal-description {
+  margin: 0;
+  font-size: 0.92rem;
+  color: #4b5563;
+  line-height: 1.45;
+}
+
+.audit-modal-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #64748b;
+}
+
+.audit-modal-body textarea {
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  padding: 0.85rem;
+  font-size: 0.95rem;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 150px;
+  transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+.audit-modal-body textarea:focus {
+  outline: none;
+  border-color: #1f6feb;
+  box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.15);
+}
+
+.audit-modal-body textarea:disabled {
+  background: #f1f5f9;
+  cursor: not-allowed;
+}
+
+.audit-modal-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.audit-submit-btn {
+  padding: 0.55rem 1.2rem;
+  border: none;
+  border-radius: 8px;
+  background: #16a34a;
+  color: #ffffff;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease-in-out, transform 0.15s ease-in-out;
+}
+
+.audit-submit-btn:hover:not(:disabled) {
+  background: #15803d;
+  transform: translateY(-1px);
+}
+
+.audit-submit-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.audit-upload-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  background: #f1f5f9;
+  color: #1f2937;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid #e2e8f0;
+}
+
+.audit-upload-btn:hover {
+  background: #e2e8f0;
+}
+
+.audit-cancel-btn {
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  border: 1px solid #cbd5f5;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.audit-cancel-btn:hover:not(:disabled) {
+  background: #f8fafc;
+}
+
+.audit-cancel-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.audit-uploaded-list {
+  border-top: 1px solid #e2e8f0;
+  padding-top: 0.75rem;
+  font-size: 0.85rem;
+  color: #475569;
+}
+
+.audit-uploaded-list ul {
+  margin: 0.35rem 0 0 0;
+  padding-left: 1.1rem;
+}
+
+.audit-uploaded-list li {
+  margin-bottom: 0.25rem;
+}
+
+.audit-modal-alert {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #b91c1c;
+}
+
+.audit-upload-btn.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.audit-upload-btn.disabled:hover {
+  background: #f1f5f9;
+}

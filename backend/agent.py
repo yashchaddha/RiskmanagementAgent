@@ -60,6 +60,8 @@ def orchestrator_node(state: LLMState) -> LLMState:
         "control_parameters": state.get("control_parameters", {}),
         "audit_context": audit_context,
         "audit_progress": audit_progress,
+        "assistant_actions": [],
+        "awaiting_audit_answer": state.get("awaiting_audit_answer", False),
     }
 
     if routing_decision == "audit_facilitator":
@@ -93,6 +95,7 @@ def orchestrator_node(state: LLMState) -> LLMState:
             "is_control_related": False,
             "control_target": "",
             "audit_session_active": False,
+            "awaiting_audit_answer": False,
         }
     elif routing_decision == "control_node":
         return {
@@ -109,6 +112,7 @@ def orchestrator_node(state: LLMState) -> LLMState:
             "is_control_related": True,
             "control_target": "",
             "audit_session_active": False,
+            "awaiting_audit_answer": False,
         }
     else:  # knowledge_node
         return {
@@ -125,6 +129,7 @@ def orchestrator_node(state: LLMState) -> LLMState:
             "is_control_related": False,
             "control_target": "",
             "audit_session_active": False,
+            "awaiting_audit_answer": False,
         }
 
 def knowledge_node(state: LLMState):
@@ -369,13 +374,22 @@ def run_agent(message: str, conversation_history: list = None, risk_context: dic
         "control_parameters": {},
         "audit_session_active": False,
         "audit_context": {},
-        "audit_progress": {}
+        "audit_progress": {},
+        "assistant_actions": [],
+        "awaiting_audit_answer": False
     }
     
     # Use thread_id for memory persistence within the session
     config = {"configurable": {"thread_id": thread_id}}
     result = graph.invoke(state, config)
-    return result["output"], result["conversation_history"], result["risk_context"], result["user_data"]
+    return (
+        result.get("output", ""),
+        result.get("conversation_history", []),
+        result.get("risk_context", {}),
+        result.get("user_data", {}),
+        result.get("assistant_actions", []),
+        result.get("awaiting_audit_answer", False),
+    )
 
 
 GREETING_MESSAGE = """Welcome to the Risk Management Agent! I'm here to help your organization with comprehensive risk assessment, compliance management, and risk mitigation strategies. 

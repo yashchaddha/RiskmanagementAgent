@@ -5,13 +5,13 @@ from typing import Any, Dict, Optional
 from langchain_core.tools import tool
 
 from database import AuditDatabaseService
-from models import AuditItem, AuditProgress
+from models import AuditItem, AuditProgress, AuditTypeProgress, AuditPhaseProgress
 
 
 def _serialize_data(data: Any):
     if isinstance(data, AuditItem):
         return data.dict()
-    if isinstance(data, AuditProgress):
+    if isinstance(data, (AuditProgress, AuditTypeProgress, AuditPhaseProgress)):
         return data.dict()
     if isinstance(data, list):
         return [_serialize_data(item) for item in data]
@@ -69,6 +69,62 @@ def get_next_audit_item(user_id: str) -> Dict[str, Any]:
     return _result_to_dict(result)
 
 
+@tool("get_annex_progress")
+def get_annex_progress(user_id: str) -> Dict[str, Any]:
+    """Fetch clause and annex progress details."""
+    result = AuditDatabaseService.get_phase_progress(user_id)
+    return _result_to_dict(result)
+
+
+@tool("get_next_annex_item")
+def get_next_annex_item(user_id: str) -> Dict[str, Any]:
+    """Fetch the next pending or skipped annex control for the user."""
+    result = AuditDatabaseService.get_next_item_by_type(user_id, "annex")
+    return _result_to_dict(result)
+
+
+@tool("exclude_annex_item")
+def exclude_annex_item(user_id: str, item_id: str) -> Dict[str, Any]:
+    """Exclude a specific annex control from the assessment."""
+    result = _run_coroutine_sync(AuditDatabaseService.exclude_annex_item(user_id, item_id))
+    return _result_to_dict(result)
+
+
+@tool("reinstate_annex_item")
+def reinstate_annex_item(user_id: str, item_id: str) -> Dict[str, Any]:
+    """Reinstate a previously excluded annex control."""
+    result = _run_coroutine_sync(AuditDatabaseService.reinstate_annex_item(user_id, item_id))
+    return _result_to_dict(result)
+
+
+@tool("exclude_annex_group")
+def exclude_annex_group(user_id: str, annex_group: str) -> Dict[str, Any]:
+    """Exclude an entire annex group (e.g., A.5) from the assessment."""
+    result = _run_coroutine_sync(AuditDatabaseService.exclude_annex_group(user_id, annex_group))
+    return _result_to_dict(result)
+
+
+@tool("reinstate_annex_group")
+def reinstate_annex_group(user_id: str, annex_group: str) -> Dict[str, Any]:
+    """Reinstate an annex group that was previously excluded."""
+    result = _run_coroutine_sync(AuditDatabaseService.reinstate_annex_group(user_id, annex_group))
+    return _result_to_dict(result)
+
+
+@tool("skip_annex_group")
+def skip_annex_group(user_id: str, annex_group: str) -> Dict[str, Any]:
+    """Mark all controls within an annex group as skipped."""
+    result = _run_coroutine_sync(AuditDatabaseService.mark_annex_group_skipped(user_id, annex_group))
+    return _result_to_dict(result)
+
+
+@tool("reset_annex_group")
+def reset_annex_group(user_id: str, annex_group: str) -> Dict[str, Any]:
+    """Reset all controls within an annex group back to pending."""
+    result = _run_coroutine_sync(AuditDatabaseService.reset_annex_group_to_pending(user_id, annex_group))
+    return _result_to_dict(result)
+
+
 @tool("list_audit_items")
 def list_audit_items(user_id: str, status: Optional[str] = None, limit: int = 50, skip: int = 0) -> Dict[str, Any]:
     """List audit items for the user with optional status filter."""
@@ -76,11 +132,6 @@ def list_audit_items(user_id: str, status: Optional[str] = None, limit: int = 50
     return _result_to_dict(result)
 
 
-@tool("submit_audit_answer")
-def submit_audit_answer(user_id: str, item_id: str, answer: str) -> Dict[str, Any]:
-    """Store the user's answer for the specified clause."""
-    result = _run_coroutine_sync(AuditDatabaseService.submit_answer(user_id, item_id, answer))
-    return _result_to_dict(result)
 
 
 @tool("skip_audit_item")

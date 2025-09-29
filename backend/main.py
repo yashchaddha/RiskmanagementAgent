@@ -51,6 +51,8 @@ class ChatResponse(BaseModel):
     response: str
     conversation_history: List[dict]
     risk_context: Dict[str, Any]
+    assistant_actions: List[Dict[str, Any]]
+    awaiting_audit_answer: bool
 
 class GreetingRequest(BaseModel):
     user_name: Optional[str] = None
@@ -95,7 +97,7 @@ async def chat(request: ChatRequest, current_user=Depends(get_current_user)):
         "risks_applicable": current_user.get("risks_applicable", [])
     }
     
-    response, updated_history, updated_risk_context, updated_user_data = run_agent(
+    response, updated_history, updated_risk_context, updated_user_data, assistant_actions, awaiting_audit_answer = run_agent(
         request.message, 
         request.conversation_history, 
         request.risk_context,
@@ -105,7 +107,9 @@ async def chat(request: ChatRequest, current_user=Depends(get_current_user)):
     return ChatResponse(
         response=response, 
         conversation_history=updated_history,
-        risk_context=updated_risk_context
+        risk_context=updated_risk_context,
+        assistant_actions=assistant_actions,
+        awaiting_audit_answer=awaiting_audit_answer
     )
 
 

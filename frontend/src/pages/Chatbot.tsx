@@ -13,11 +13,17 @@ import badge from "../assets/badge.png";
 import nexiGif from "../assets/nexi.gif";
 import arrowUp from "../assets/arrow-up.png";
 
+interface AssistantAction {
+  type: string;
+  item?: AuditNextItem;
+}
+
 interface Message {
   id: string;
   text: string;
   sender: "user" | "bot";
   timestamp: Date;
+  action?: AssistantAction;
 }
 
 interface Risk {
@@ -47,10 +53,14 @@ interface AuditProgressSummary {
 }
 
 interface AuditNextItem {
+  item_id?: string;
   iso_reference?: string;
   title?: string;
   section_title?: string;
   status?: string;
+  description?: string;
+  answer?: string;
+  evidences?: { file_name?: string }[];
 }
 
 interface RiskContext {
@@ -236,12 +246,21 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const [isFinalizingRisks, setIsFinalizingRisks] = useState(false);
   const [showControlsTable, setShowControlsTable] = useState(false);
   const [showControlLibrary, setShowControlLibrary] = useState(false);
-    const [generatedControls, setGeneratedControls] = useState<ControlItem[]>([]);
-    const [isSavingControls, setIsSavingControls] = useState(false);
-    const messagesEndRef = useRef<HTMLDivElement>(null);
-    const [animateMessageId, setAnimateMessageId] = useState<string | null>(null);
+  const [generatedControls, setGeneratedControls] = useState<ControlItem[]>([]);
+  const [isSavingControls, setIsSavingControls] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [animateMessageId, setAnimateMessageId] = useState<string | null>(null);
 
-    const auditProgress = riskContext?.audit;
+  const [isAuditAnswerModalOpen, setIsAuditAnswerModalOpen] = useState(false);
+  const [activeAuditItem, setActiveAuditItem] = useState<AuditNextItem | null>(null);
+  const [auditAnswerText, setAuditAnswerText] = useState("");
+  const [isSubmittingAuditAnswer, setIsSubmittingAuditAnswer] = useState(false);
+  const [isUploadingAuditEvidence, setIsUploadingAuditEvidence] = useState(false);
+  const [uploadedAuditEvidence, setUploadedAuditEvidence] = useState<string[]>([]);
+  const [auditModalAlert, setAuditModalAlert] = useState<string>("");
+  const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
+
+  const auditProgress = riskContext?.audit;
     const auditNextItem = riskContext?.audit_next_item;
     const auditComplete = Boolean(riskContext?.audit_complete || auditProgress?.all_completed);
     const answeredCount = auditProgress?.answered ?? 0;
@@ -253,6 +272,34 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  const handleChatSuccess = async (data: any) => {
+    const formattedResponse = await checkForRiskGeneration(data.response, data.risk_context);
+    const assistantActions = Array.isArray(data?.assistant_actions) ? data.assistant_actions : [];
+    const requestAction = assistantActions.find((action: any) => action?.type === "request_audit_answer");
+
+    const botMessage: Message = {
+      id: (Date.now() + 1).toString(),
+      text: formattedResponse,
+      sender: "bot",
+      timestamp: new Date(),
+      action:
+        requestAction && requestAction.item
+          ? { type: requestAction.type, item: requestAction.item }
+          : undefined,
+    };
+
+    setMessages((prev) => [...prev, botMessage]);
+    setAnimateMessageId(botMessage.id);
+    setConversationHistory(data.conversation_history);
+    setRiskContext(data.risk_context);
+
+    const genControls = data?.risk_context?.generated_controls;
+    if (Array.isArray(genControls) && genControls.length > 0) {
+      setGeneratedControls(genControls);
+      setShowControlsTable(true);
+    }
   };
 
   useEffect(() => {
@@ -391,29 +438,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
 
       if (response.ok) {
         const data = await response.json();
-
-        // Check if this response contains generated risks and format it
-        const formattedResponse = await checkForRiskGeneration(data.response, data.risk_context);
-
-        // Create bot message with formatted response
-        const botMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          text: formattedResponse,
-          sender: "bot",
-          timestamp: new Date(),
-        };
-
-        setMessages((prev) => [...prev, botMessage]);
-        setAnimateMessageId(botMessage.id);
-        setConversationHistory(data.conversation_history);
-        setRiskContext(data.risk_context);
-
-        // If backend provided generated controls in risk_context, open the controls popup
-        const genControls = data?.risk_context?.generated_controls;
-        if (Array.isArray(genControls) && genControls.length > 0) {
-          setGeneratedControls(genControls);
-          setShowControlsTable(true);
-        }
+        await handleChatSuccess(data);
       } else {
         const errorData = await response.json().catch(() => ({}));
         console.error("API Error:", response.status, errorData);
@@ -714,6 +739,196 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
     const hasMatrixSize = /(3x3|3\*3|4x4|4\*4|5x5|5\*5)/i.test(message);
 
     return hasApplyKeyword && hasMatrixSize;
+  };
+
+  const openAuditAnswerModal = (item?: AuditNextItem) => {
+    if (!item) return;
+    setActiveAuditItem(item);
+    setAuditAnswerText(item.answer ?? "");
+    const existingEvidence = (item.evidences || [])
+      .map((ev) => ev?.file_name)
+      .filter((name): name is string => Boolean(name));
+    setUploadedAuditEvidence(existingEvidence);
+    setAuditModalAlert("");
+    setIsAuditAnswerModalOpen(true);
+  };
+
+  const closeAuditAnswerModal = () => {
+    setIsAuditAnswerModalOpen(false);
+    setActiveAuditItem(null);
+    setAuditAnswerText("");
+    setUploadedAuditEvidence([]);
+    setAuditModalAlert("");
+    if (fileUploadInputRef.current) {
+      fileUploadInputRef.current.value = "";
+    }
+  };
+
+  const handleAuditEvidenceUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (!activeAuditItem?.item_id || !event.target.files?.length) {
+      return;
+    }
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setAuditModalAlert("Authentication error. Please log in again.");
+      return;
+    }
+
+    const file = event.target.files[0];
+    setIsUploadingAuditEvidence(true);
+    setAuditModalAlert("");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch(`http://localhost:8000/audit/items/${activeAuditItem.item_id}/evidence`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        body: formData,
+      });
+
+      if (response.ok) {
+        setUploadedAuditEvidence((prev) => [...prev, file.name]);
+        setAuditModalAlert(`Evidence "${file.name}" uploaded successfully.`);
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        const message = errorData?.detail || errorData?.message || "Failed to upload evidence. Please try again.";
+        setAuditModalAlert(message);
+      }
+    } catch (error) {
+      setAuditModalAlert("Failed to upload evidence. Please try again.");
+    } finally {
+      setIsUploadingAuditEvidence(false);
+      if (fileUploadInputRef.current) {
+        fileUploadInputRef.current.value = "";
+      }
+    }
+  };
+
+  const sendAuditConfirmationMessage = async (messageText: string): Promise<boolean> => {
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      text: messageText,
+      sender: "user",
+      timestamp: new Date(),
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setIsLoading(true);
+
+    let wasSuccessful = false;
+
+    try {
+      const token = localStorage.getItem("token");
+      if (!token) {
+        throw new Error("No authentication token found");
+      }
+
+      const response = await fetch("http://localhost:8000/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          message: messageText,
+          conversation_history: conversationHistory,
+          risk_context: riskContext,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        await handleChatSuccess(data);
+        wasSuccessful = true;
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        let errorText = "Sorry, I encountered an error while processing your audit update. Please try again.";
+        if (response.status === 401) {
+          errorText = "Authentication error. Please log in again.";
+        } else if (errorData.detail) {
+          errorText = `Error: ${errorData.detail}`;
+        }
+
+        const errorMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          text: errorText,
+          sender: "bot",
+          timestamp: new Date(),
+        };
+
+        setMessages((prev) => [...prev, errorMessage]);
+        setAnimateMessageId(errorMessage.id);
+      }
+    } catch (error) {
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        text: "Sorry, I encountered an error while processing your audit update. Please try again.",
+        sender: "bot",
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+      setAnimateMessageId(errorMessage.id);
+    } finally {
+      setIsLoading(false);
+    }
+
+    return wasSuccessful;
+  };
+
+
+  const handleAuditAnswerSubmit = async () => {
+    if (!activeAuditItem?.item_id) {
+      setAuditModalAlert("Unable to determine the clause. Please close the dialog and try again.");
+      return;
+    }
+
+    if (!auditAnswerText.trim()) {
+      setAuditModalAlert("Please enter your clause response before submitting.");
+      return;
+    }
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setAuditModalAlert("Authentication error. Please log in again.");
+      return;
+    }
+
+    setIsSubmittingAuditAnswer(true);
+    setAuditModalAlert("");
+
+    try {
+      const response = await fetch(`http://localhost:8000/audit/items/${activeAuditItem.item_id}/answer`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ answer: auditAnswerText.trim() }),
+      });
+
+      if (response.ok) {
+        const clauseLabel = activeAuditItem.iso_reference || activeAuditItem.title || "the clause";
+        const delivered = await sendAuditConfirmationMessage(`Answer recorded for ${clauseLabel}.`);
+        if (delivered) {
+          closeAuditAnswerModal();
+        } else {
+          setAuditModalAlert("Answer saved, but I couldn't notify Nexi. Please try again to continue the conversation.");
+        }
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        const message = errorData?.detail || errorData?.message || "Failed to submit the answer. Please try again.";
+        setAuditModalAlert(message);
+      }
+    } catch (error) {
+      setAuditModalAlert("Failed to submit the answer. Please try again.");
+    } finally {
+      setIsSubmittingAuditAnswer(false);
+    }
   };
 
   const extractMatrixSize = (message: string): string => {
@@ -1105,6 +1320,75 @@ Please try again or contact support if the issue persists.`,
         />
       )}
 
+      {isAuditAnswerModalOpen && activeAuditItem && (
+        <div className="audit-modal-backdrop">
+          <div className="audit-modal">
+            <div className="audit-modal-header">
+              <h3>Submit Clause Response</h3>
+              <button className="audit-modal-close" onClick={closeAuditAnswerModal} disabled={isSubmittingAuditAnswer || isUploadingAuditEvidence}>X</button>
+            </div>
+            <div className="audit-modal-body">
+              <p className="audit-modal-clause">
+                {activeAuditItem.iso_reference && (
+                  <span className="audit-modal-clause-ref">{activeAuditItem.iso_reference}</span>
+                )}
+                {activeAuditItem.title && <span className="audit-modal-clause-title">{activeAuditItem.title}</span>}
+              </p>
+              {activeAuditItem.description && (
+                <p className="audit-modal-description">{activeAuditItem.description}</p>
+              )}
+              <label className="audit-modal-label" htmlFor="audit-answer-input">Your response</label>
+              <textarea
+                id="audit-answer-input"
+                value={auditAnswerText}
+                onChange={(event) => setAuditAnswerText(event.target.value)}
+                placeholder="Capture your clause response..."
+                rows={6}
+                disabled={isSubmittingAuditAnswer}
+              />
+              <div className="audit-modal-buttons">
+                <button
+                  className="audit-submit-btn"
+                  onClick={handleAuditAnswerSubmit}
+                  disabled={isSubmittingAuditAnswer || isUploadingAuditEvidence}
+                >
+                  {isSubmittingAuditAnswer ? "Saving..." : "Submit answer"}
+                </button>
+                <label className={`audit-upload-btn${isUploadingAuditEvidence || isSubmittingAuditAnswer ? " disabled" : ""}`}>
+                  <input
+                    type="file"
+                    ref={fileUploadInputRef}
+                    onChange={handleAuditEvidenceUpload}
+                    disabled={isUploadingAuditEvidence || isSubmittingAuditAnswer}
+                    accept="*/*"
+                    hidden
+                  />
+                  {isUploadingAuditEvidence ? "Uploading..." : "Upload evidence"}
+                </label>
+                <button
+                  className="audit-cancel-btn"
+                  onClick={closeAuditAnswerModal}
+                  disabled={isSubmittingAuditAnswer || isUploadingAuditEvidence}
+                >
+                  Cancel
+                </button>
+              </div>
+              {uploadedAuditEvidence.length > 0 && (
+                <div className="audit-uploaded-list">
+                  <span>Uploaded evidence:</span>
+                  <ul>
+                    {uploadedAuditEvidence.map((fileName) => (
+                      <li key={fileName}>{fileName}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {auditModalAlert && <p className="audit-modal-alert">{auditModalAlert}</p>}
+            </div>
+          </div>
+        </div>
+      )}
+
       {auditProgress && (
         <div className="audit-status-card">
           <div className="audit-status-top">
@@ -1179,6 +1463,15 @@ Please try again or contact support if the issue persists.`,
                     }}
                     messageId={message.id}
                   />
+                  {message.action?.type === "request_audit_answer" && (
+                    <button
+                      className="audit-answer-button"
+                      onClick={() => openAuditAnswerModal(message.action?.item)}
+                      disabled={isLoading}
+                    >
+                      Submit clause answer
+                    </button>
+                  )}
                 </>
               ) : (
                 <p>{message.text}</p>

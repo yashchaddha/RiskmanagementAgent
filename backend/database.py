@@ -25,6 +25,8 @@ from models import (
     AuditItem,
     AuditEvidence,
     AuditProgress,
+    AuditTypeProgress,
+    AuditPhaseProgress,
 )
 from knowledge_base import ISO_27001_KNOWLEDGE
 
@@ -168,10 +170,12 @@ class AuditTemplateService:
     def build_iso_27001_templates(cls) -> List[Dict[str, Any]]:
         iso_data = ISO_27001_KNOWLEDGE.get("ISO27001_2022", {})
         clause_sections = iso_data.get(cls.CLAUSES_KEY, []) or []
+        annex_sections = iso_data.get(cls.ANNEX_KEY, []) or []
 
         templates: List[Dict[str, Any]] = []
         order_index = 1
 
+        # Core clauses
         for clause in clause_sections:
             section = clause.get("id", "")
             section_title = clause.get("title", section)
@@ -191,6 +195,7 @@ class AuditTemplateService:
                         "parent_reference": section,
                         "parent_title": section_title,
                         "order_index": order_index,
+                        "annex_group": None,
                     })
                     order_index += 1
             else:
@@ -204,6 +209,47 @@ class AuditTemplateService:
                     "parent_reference": None,
                     "parent_title": None,
                     "order_index": order_index,
+                    "annex_group": None,
+                })
+                order_index += 1
+
+        # Annex A controls
+        for annex in annex_sections:
+            annex_id = annex.get("id", "")
+            annex_title = annex.get("title", annex_id)
+            annex_description = annex.get("description", "")
+            controls = annex.get("controls", []) or []
+
+            if controls:
+                for control in controls:
+                    control_id = control.get("id") or annex_id
+                    control_title = control.get("title", annex_title)
+                    control_description = control.get("description", annex_description)
+                    templates.append({
+                        "type": "annex",
+                        "iso_reference": control_id,
+                        "section": annex_id,
+                        "section_title": annex_title,
+                        "title": control_title,
+                        "description": control_description,
+                        "parent_reference": annex_id,
+                        "parent_title": annex_title,
+                        "annex_group": annex_id,
+                        "order_index": order_index,
+                    })
+                    order_index += 1
+            else:
+                templates.append({
+                    "type": "annex",
+                    "iso_reference": annex_id,
+                    "section": annex_id,
+                    "section_title": annex_title,
+                    "title": annex_title,
+                    "description": annex_description,
+                    "parent_reference": None,
+                    "parent_title": None,
+                    "annex_group": annex_id,
+                    "order_index": order_index,
                 })
                 order_index += 1
 
@@ -213,7 +259,44 @@ class AuditTemplateService:
 class AuditDatabaseService:
     """Database helpers for user-specific audit clauses and annexes."""
 
-    VALID_STATUSES = {"pending", "answered", "skipped"}
+    VALID_STATUSES = {"pending", "answered", "skipped", "excluded"}
+
+    @staticmethod
+    def _normalize_annex_group(value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        normalized = str(value).strip().upper()
+        if not normalized:
+            return None
+
+        normalized = normalized.replace('ANNEX', '').strip()
+        normalized = normalized.lstrip(':- _').strip()
+        normalized = normalized.replace('_', '.').replace(' ', '')
+
+        if not normalized:
+            return None
+        if not normalized.startswith('A'):
+            normalized = f'A.{normalized}' if not normalized.startswith('A.') else normalized
+        elif not normalized.startswith('A.'):
+            normalized = normalized.replace('A', 'A.', 1)
+        if normalized.endswith('.'):
+            normalized = normalized[:-1]
+        return normalized
+
+    @staticmethod
+    def _build_annex_group_query(user_id: str, annex_group: str) -> Dict[str, Any]:
+        normalized = AuditDatabaseService._normalize_annex_group(annex_group)
+        if not normalized:
+            normalized = str(annex_group).strip()
+        regex = f"^{re.escape(normalized)}"
+        return {
+            "user_id": user_id,
+            "type": "annex",
+            "$or": [
+                {"annex_group": normalized},
+                {"iso_reference": {"$regex": regex}}
+            ],
+        }
 
     @staticmethod
     def _document_to_model(doc: Dict[str, Any]) -> Optional[AuditItem]:
@@ -261,11 +344,14 @@ class AuditDatabaseService:
                 "description": template.get("description"),
                 "parent_reference": template.get("parent_reference"),
                 "parent_title": template.get("parent_title"),
+                "annex_group": template.get("annex_group"),
                 "order_index": template.get("order_index", 0),
                 "status": "pending",
                 "answer": None,
                 "answer_updated_at": None,
                 "skipped_at": None,
+                "excluded": False,
+                "excluded_at": None,
                 "evidences": [],
                 "created_at": now,
                 "updated_at": now,
@@ -284,15 +370,15 @@ class AuditDatabaseService:
 
     @staticmethod
     def get_progress_summary(user_id: str) -> DatabaseResult:
-        query = {"user_id": user_id}
-        total = audit_items_collection.count_documents(query)
+        base_filter = {"user_id": user_id, "excluded": {"$ne": True}}
+        total = audit_items_collection.count_documents(base_filter)
 
         if total == 0:
             progress = AuditProgress(total=0, pending=0, answered=0, skipped=0)
             return DatabaseResult(True, "No audit items found for user", progress)
 
-        answered = audit_items_collection.count_documents({**query, "status": "answered"})
-        skipped = audit_items_collection.count_documents({**query, "status": "skipped"})
+        answered = audit_items_collection.count_documents({**base_filter, "status": "answered"})
+        skipped = audit_items_collection.count_documents({**base_filter, "status": "skipped"})
         pending = max(total - answered - skipped, 0)
 
         progress = AuditProgress(
@@ -302,6 +388,23 @@ class AuditDatabaseService:
             skipped=skipped,
         )
         return DatabaseResult(True, "Audit progress summary retrieved", progress)
+
+    @staticmethod
+    def get_phase_progress(user_id: str) -> DatabaseResult:
+        def _progress_for(item_type: str) -> AuditTypeProgress:
+            type_filter = {"user_id": user_id, "type": item_type}
+            total = audit_items_collection.count_documents({**type_filter, "excluded": {"$ne": True}})
+            answered = audit_items_collection.count_documents({**type_filter, "excluded": {"$ne": True}, "status": "answered"})
+            skipped = audit_items_collection.count_documents({**type_filter, "excluded": {"$ne": True}, "status": "skipped"})
+            excluded = audit_items_collection.count_documents({**type_filter, "excluded": True})
+            pending = max(total - answered - skipped, 0)
+            return AuditTypeProgress(total=total, pending=pending, answered=answered, skipped=skipped, excluded=excluded)
+
+        clauses = _progress_for("clause")
+        annexes = _progress_for("annex")
+
+        phase_progress = AuditPhaseProgress(clauses=clauses, annexes=annexes)
+        return DatabaseResult(True, "Audit phase progress retrieved", phase_progress)
 
     @staticmethod
     async def get_audit_items(
@@ -334,22 +437,36 @@ class AuditDatabaseService:
         return DatabaseResult(True, "Audit items fetched successfully", data)
 
     @staticmethod
-    def get_next_actionable_item(user_id: str) -> DatabaseResult:
-        pending_doc = audit_items_collection.find_one(
-            {"user_id": user_id, "status": "pending"},
-            sort=[("order_index", 1)]
-        )
+    def get_next_item_by_type(user_id: str, item_type: str) -> DatabaseResult:
+        base_filter = {"user_id": user_id, "type": item_type, "excluded": {"$ne": True}}
+        pending_doc = audit_items_collection.find_one({**base_filter, "status": "pending"}, sort=[("order_index", 1)])
         if not pending_doc:
-            pending_doc = audit_items_collection.find_one(
-                {"user_id": user_id, "status": "skipped"},
-                sort=[("order_index", 1)]
-            )
+            pending_doc = audit_items_collection.find_one({**base_filter, "status": "skipped"}, sort=[("order_index", 1)])
 
         if not pending_doc:
-            return DatabaseResult(True, "All audit items completed", None)
+            return DatabaseResult(True, "All audit items completed for requested type", None)
 
         item = AuditDatabaseService._document_to_model(pending_doc)
         return DatabaseResult(True, "Next audit item retrieved", item)
+
+    def get_next_actionable_item(user_id: str) -> DatabaseResult:
+        return AuditDatabaseService.get_next_item_by_type(user_id, "clause")
+
+    @staticmethod
+    def get_item_by_item_id(user_id: str, item_id: str) -> DatabaseResult:
+        document = audit_items_collection.find_one({"user_id": user_id, "item_id": item_id})
+        if not document:
+            return DatabaseResult(False, f"Audit item {item_id} not found for user {user_id}")
+        item = AuditDatabaseService._document_to_model(document)
+        return DatabaseResult(True, "Audit item retrieved", item)
+
+    @staticmethod
+    def get_item_by_iso_reference(user_id: str, iso_reference: str) -> DatabaseResult:
+        document = audit_items_collection.find_one({"user_id": user_id, "iso_reference": iso_reference})
+        if not document:
+            return DatabaseResult(False, f"Audit item with ISO reference {iso_reference} not found for user {user_id}")
+        item = AuditDatabaseService._document_to_model(document)
+        return DatabaseResult(True, "Audit item retrieved", item)
 
     @staticmethod
     async def submit_answer(user_id: str, item_id: str, answer: str) -> DatabaseResult:
@@ -357,7 +474,7 @@ class AuditDatabaseService:
         now = datetime.utcnow()
 
         updated = audit_items_collection.find_one_and_update(
-            {"user_id": user_id, "item_id": item_id},
+            {"user_id": user_id, "item_id": item_id, "excluded": {"$ne": True}},
             {
                 "$set": {
                     "answer": trimmed_answer,
@@ -381,7 +498,7 @@ class AuditDatabaseService:
         now = datetime.utcnow()
 
         updated = audit_items_collection.find_one_and_update(
-            {"user_id": user_id, "item_id": item_id},
+            {"user_id": user_id, "item_id": item_id, "excluded": {"$ne": True}},
             {
                 "$set": {
                     "status": "skipped",
@@ -403,7 +520,7 @@ class AuditDatabaseService:
         now = datetime.utcnow()
 
         updated = audit_items_collection.find_one_and_update(
-            {"user_id": user_id, "item_id": item_id},
+            {"user_id": user_id, "item_id": item_id, "excluded": {"$ne": True}},
             {
                 "$set": {
                     "status": "pending",
@@ -418,6 +535,141 @@ class AuditDatabaseService:
 
         item = AuditDatabaseService._document_to_model(updated)
         return DatabaseResult(True, "Audit item reset to pending", item)
+
+    @staticmethod
+    async def exclude_annex_item(user_id: str, item_id: str) -> DatabaseResult:
+        now = datetime.utcnow()
+
+        updated = audit_items_collection.find_one_and_update(
+            {"user_id": user_id, "item_id": item_id, "type": "annex"},
+            {
+                "$set": {
+                    "excluded": True,
+                    "excluded_at": now,
+                    "status": "excluded",
+                    "skipped_at": None,
+                    "answer": None,
+                    "answer_updated_at": None,
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+
+        if not updated:
+            return DatabaseResult(False, f"Annex item {item_id} not found for user {user_id}")
+
+        item = AuditDatabaseService._document_to_model(updated)
+        return DatabaseResult(True, "Annex item excluded", item)
+
+    @staticmethod
+    async def reinstate_annex_item(user_id: str, item_id: str) -> DatabaseResult:
+        now = datetime.utcnow()
+
+        updated = audit_items_collection.find_one_and_update(
+            {"user_id": user_id, "item_id": item_id, "type": "annex"},
+            {
+                "$set": {
+                    "excluded": False,
+                    "excluded_at": None,
+                    "status": "pending",
+                    "skipped_at": None,
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+
+        if not updated:
+            return DatabaseResult(False, f"Annex item {item_id} not found for user {user_id}")
+
+        item = AuditDatabaseService._document_to_model(updated)
+        return DatabaseResult(True, "Annex item reinstated", item)
+
+    @staticmethod
+    async def exclude_annex_group(user_id: str, annex_group: str) -> DatabaseResult:
+        now = datetime.utcnow()
+        query = AuditDatabaseService._build_annex_group_query(user_id, annex_group)
+        result = audit_items_collection.update_many(
+            query,
+            {
+                "$set": {
+                    "excluded": True,
+                    "excluded_at": now,
+                    "status": "excluded",
+                    "skipped_at": None,
+                    "answer": None,
+                    "answer_updated_at": None,
+                    "updated_at": now,
+                }
+            },
+        )
+        modified = result.modified_count if result else 0
+        if modified == 0:
+            return DatabaseResult(False, f"No annex items found for group {annex_group}")
+        return DatabaseResult(True, f"Excluded {modified} annex items", {"modified": modified})
+
+    @staticmethod
+    async def reinstate_annex_group(user_id: str, annex_group: str) -> DatabaseResult:
+        now = datetime.utcnow()
+        query = AuditDatabaseService._build_annex_group_query(user_id, annex_group)
+        result = audit_items_collection.update_many(
+            query,
+            {
+                "$set": {
+                    "excluded": False,
+                    "excluded_at": None,
+                    "status": "pending",
+                    "skipped_at": None,
+                    "updated_at": now,
+                }
+            },
+        )
+        modified = result.modified_count if result else 0
+        if modified == 0:
+            return DatabaseResult(False, f"No annex items found for group {annex_group}")
+        return DatabaseResult(True, f"Reinstated {modified} annex items", {"modified": modified})
+
+    @staticmethod
+    async def mark_annex_group_skipped(user_id: str, annex_group: str) -> DatabaseResult:
+        now = datetime.utcnow()
+        query = AuditDatabaseService._build_annex_group_query(user_id, annex_group)
+        result = audit_items_collection.update_many(
+            query,
+            {
+                "$set": {
+                    "status": "skipped",
+                    "skipped_at": now,
+                    "excluded": False,
+                    "excluded_at": None,
+                    "updated_at": now,
+                }
+            },
+        )
+        modified = result.modified_count if result else 0
+        if modified == 0:
+            return DatabaseResult(False, f"No annex items found for group {annex_group}")
+        return DatabaseResult(True, f"Marked {modified} annex items as skipped", {"modified": modified})
+
+    @staticmethod
+    async def reset_annex_group_to_pending(user_id: str, annex_group: str) -> DatabaseResult:
+        query = AuditDatabaseService._build_annex_group_query(user_id, annex_group)
+        result = audit_items_collection.update_many(
+            query,
+            {
+                "$set": {
+                    "status": "pending",
+                    "skipped_at": None,
+                    "excluded": False,
+                    "excluded_at": None,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
+        modified = result.modified_count if result else 0
+        if modified == 0:
+            return DatabaseResult(False, f"No annex items found for group {annex_group}")
+        return DatabaseResult(True, f"Reset {modified} annex items to pending", {"modified": modified})
 
     @staticmethod
     async def delete_item(user_id: str, item_id: str) -> DatabaseResult:
