@@ -118,6 +118,14 @@ class AuditEvidence(BaseModel):
     version_id: Optional[str] = None
     checksum: Optional[str] = None
     url: Optional[str] = None
+    validation_status: Optional[str] = None
+    validation_summary: Optional[str] = None
+    validation_confidence: Optional[float] = None
+    validation_recommendations: Optional[List[str]] = None
+    last_validated_at: Optional[datetime] = None
+    validation_model: Optional[str] = None
+    validation_error: Optional[str] = None
+    validation_truncated: Optional[bool] = None
 
 
 class AuditItem(BaseModel):
@@ -214,3 +222,4 @@ class ControlsResponse(BaseModel):
     success: bool
     message: str
     data: Optional[List[Control]] = None
+

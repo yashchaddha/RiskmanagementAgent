@@ -721,12 +721,161 @@
 }
 
 .audit-uploaded-list ul {
-  margin: 0.35rem 0 0 0;
-  padding-left: 1.1rem;
+  margin: 0.5rem 0 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
 }
 
 .audit-uploaded-list li {
-  margin-bottom: 0.25rem;
+  list-style: none;
+}
+
+.audit-evidence-row {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 0.75rem;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.audit-evidence-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.audit-evidence-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.75rem;
+  align-items: center;
+}
+
+.audit-evidence-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.audit-evidence-remove-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.audit-evidence-remove-btn:hover:not(:disabled) {
+  color: #dc2626;
+}
+
+.audit-evidence-remove-btn:disabled {
+  color: #cbd5f5;
+  cursor: not-allowed;
+}
+
+.audit-evidence-name {
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.audit-evidence-status {
+  font-size: 0.75rem;
+  padding: 0.12rem 0.55rem;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #334155;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.audit-evidence-status-compliant {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.audit-evidence-status-partially_compliant {
+  background: #fef9c3;
+  color: #92400e;
+}
+
+.audit-evidence-status-not_compliant {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.audit-evidence-status-not_relevant {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.audit-evidence-status-inconclusive {
+  background: #ede9fe;
+  color: #5b21b6;
+}
+
+.audit-evidence-confidence,
+.audit-evidence-timestamp {
+  font-size: 0.75rem;
+  color: #64748b;
+}
+
+.audit-evidence-validate-btn {
+  background: #1d4ed8;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.audit-evidence-validate-btn:hover:not(:disabled) {
+  background: #1e40af;
+}
+
+.audit-evidence-validate-btn:disabled {
+  background: #cbd5f5;
+  cursor: not-allowed;
+}
+
+.audit-evidence-summary {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #475569;
+}
+
+.audit-evidence-error {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #b91c1c;
+}
+
+.audit-evidence-recommendations {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.82rem;
+  color: #475569;
+}
+
+.audit-evidence-recommendations li {
+  margin-bottom: 0.2rem;
+}
+
+.audit-modal-refresh {
+  font-size: 0.82rem;
+  color: #64748b;
+  margin-bottom: 0.6rem;
 }
 
 .audit-modal-alert {

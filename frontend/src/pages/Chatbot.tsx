@@ -52,6 +52,27 @@ interface AuditProgressSummary {
   all_completed?: boolean;
 }
 
+interface AuditEvidenceRecord {
+  id: string;
+  file_name: string;
+  file_size?: number;
+  content_type?: string | null;
+  bucket?: string | null;
+  object_key?: string | null;
+  uploaded_at?: string;
+  uploaded_by?: string;
+  checksum?: string | null;
+  version_id?: string | null;
+  validation_status?: string | null;
+  validation_summary?: string | null;
+  validation_confidence?: number | null;
+  validation_recommendations?: string[] | null;
+  last_validated_at?: string | null;
+  validation_model?: string | null;
+  validation_error?: string | null;
+  validation_truncated?: boolean | null;
+}
+
 interface AuditNextItem {
   item_id?: string;
   iso_reference?: string;
@@ -60,7 +81,8 @@ interface AuditNextItem {
   status?: string;
   description?: string;
   answer?: string;
-  evidences?: { file_name?: string }[];
+  type?: string;
+  evidences?: AuditEvidenceRecord[];
 }
 
 interface RiskContext {
@@ -256,17 +278,41 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const [auditAnswerText, setAuditAnswerText] = useState("");
   const [isSubmittingAuditAnswer, setIsSubmittingAuditAnswer] = useState(false);
   const [isUploadingAuditEvidence, setIsUploadingAuditEvidence] = useState(false);
-  const [uploadedAuditEvidence, setUploadedAuditEvidence] = useState<string[]>([]);
+  const [uploadedAuditEvidence, setUploadedAuditEvidence] = useState<AuditEvidenceRecord[]>([]);
   const [auditModalAlert, setAuditModalAlert] = useState<string>("");
+  const [validatingEvidenceId, setValidatingEvidenceId] = useState<string | null>(null);
+  const [removingEvidenceId, setRemovingEvidenceId] = useState<string | null>(null);
+  const [isRefreshingAuditItem, setIsRefreshingAuditItem] = useState(false);
   const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const auditProgress = riskContext?.audit;
-    const auditNextItem = riskContext?.audit_next_item;
-    const auditComplete = Boolean(riskContext?.audit_complete || auditProgress?.all_completed);
-    const answeredCount = auditProgress?.answered ?? 0;
-    const pendingCount = auditProgress?.pending ?? 0;
-    const skippedCount = auditProgress?.skipped ?? 0;
-    const totalCount = auditProgress?.total ?? answeredCount + pendingCount + skippedCount;
+  const auditNextItem = riskContext?.audit_next_item;
+  const auditComplete = Boolean(riskContext?.audit_complete || auditProgress?.all_completed);
+  const answeredCount = auditProgress?.answered ?? 0;
+  const pendingCount = auditProgress?.pending ?? 0;
+  const skippedCount = auditProgress?.skipped ?? 0;
+  const totalCount = auditProgress?.total ?? answeredCount + pendingCount + skippedCount;
+
+  const formatEvidenceStatus = (status?: string | null) => {
+    if (!status) return "";
+    return status.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+  };
+
+  const formatValidationConfidence = (value?: number | null) => {
+    if (typeof value !== "number" || Number.isNaN(value)) {
+      return null;
+    }
+    return `${Math.round(value * 100)}% confidence`;
+  };
+
+  const formatValidationTimestamp = (iso?: string | null) => {
+    if (!iso) return null;
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+    return date.toLocaleString();
+  };
 
   // Note: latestBotMessageId no longer used; animation is controlled by animateMessageId
 
@@ -741,16 +787,48 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
     return hasApplyKeyword && hasMatrixSize;
   };
 
-  const openAuditAnswerModal = (item?: AuditNextItem) => {
-    if (!item) return;
+  const openAuditAnswerModal = async (item?: AuditNextItem) => {
+    if (!item?.item_id) return;
+
     setActiveAuditItem(item);
     setAuditAnswerText(item.answer ?? "");
-    const existingEvidence = (item.evidences || [])
-      .map((ev) => ev?.file_name)
-      .filter((name): name is string => Boolean(name));
-    setUploadedAuditEvidence(existingEvidence);
+    setUploadedAuditEvidence(item.evidences ?? []);
+    setValidatingEvidenceId(null);
+    setRemovingEvidenceId(null);
     setAuditModalAlert("");
     setIsAuditAnswerModalOpen(true);
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setAuditModalAlert("Authentication error. Please log in again.");
+      return;
+    }
+
+    setIsRefreshingAuditItem(true);
+
+    try {
+      const response = await fetch(`http://localhost:8000/audit/items/${item.item_id}`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data?.data) {
+        const latestItem = data.data as AuditNextItem;
+        setActiveAuditItem(latestItem);
+        setAuditAnswerText(latestItem.answer ?? "");
+        setUploadedAuditEvidence(latestItem.evidences ?? []);
+      } else {
+        const message = data?.detail || data?.message || "Failed to fetch the latest clause details.";
+        setAuditModalAlert(message);
+      }
+    } catch (error) {
+      setAuditModalAlert("Failed to fetch the latest clause details. Please try again.");
+    } finally {
+      setIsRefreshingAuditItem(false);
+    }
   };
 
   const closeAuditAnswerModal = () => {
@@ -758,6 +836,9 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
     setActiveAuditItem(null);
     setAuditAnswerText("");
     setUploadedAuditEvidence([]);
+    setValidatingEvidenceId(null);
+    setRemovingEvidenceId(null);
+    setIsRefreshingAuditItem(false);
     setAuditModalAlert("");
     if (fileUploadInputRef.current) {
       fileUploadInputRef.current.value = "";
@@ -791,12 +872,17 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
         body: formData,
       });
 
-      if (response.ok) {
-        setUploadedAuditEvidence((prev) => [...prev, file.name]);
-        setAuditModalAlert(`Evidence "${file.name}" uploaded successfully.`);
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data?.data) {
+        const updatedItem = data.data as AuditNextItem;
+        setActiveAuditItem(updatedItem);
+        setAuditAnswerText(updatedItem.answer ?? "");
+        setUploadedAuditEvidence(updatedItem.evidences ?? []);
+        setValidatingEvidenceId(null);
+        setRemovingEvidenceId(null);
+        setAuditModalAlert(data?.message || `Evidence "${file.name}" uploaded successfully.`);
       } else {
-        const errorData = await response.json().catch(() => ({}));
-        const message = errorData?.detail || errorData?.message || "Failed to upload evidence. Please try again.";
+        const message = data?.detail || data?.message || "Failed to upload evidence. Please try again.";
         setAuditModalAlert(message);
       }
     } catch (error) {
@@ -808,6 +894,91 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       }
     }
   };
+
+  const handleValidateEvidence = async (evidenceId: string) => {
+    if (!activeAuditItem?.item_id) {
+      setAuditModalAlert("Unable to determine the clause or control. Please close and reopen the dialog.");
+      return;
+    }
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setAuditModalAlert("Authentication error. Please log in again.");
+      return;
+    }
+
+    setValidatingEvidenceId(evidenceId);
+    setAuditModalAlert("");
+
+    try {
+      const response = await fetch(`http://localhost:8000/audit/items/${activeAuditItem.item_id}/evidence/${evidenceId}/validate`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data?.data) {
+        const updatedItem = data.data as AuditNextItem;
+        setActiveAuditItem(updatedItem);
+        setAuditAnswerText(updatedItem.answer ?? "");
+        setUploadedAuditEvidence(updatedItem.evidences ?? []);
+        setRemovingEvidenceId((current) => (current === evidenceId ? null : current));
+        setAuditModalAlert(data?.message || "Evidence validation completed.");
+      } else {
+        const message = data?.detail || data?.message || "Failed to validate evidence. Please try again.";
+        setAuditModalAlert(message);
+      }
+    } catch (error) {
+      setAuditModalAlert("Failed to validate evidence. Please try again.");
+    } finally {
+      setValidatingEvidenceId(null);
+    }
+  };
+
+  const handleRemoveEvidence = async (evidenceId: string) => {
+    if (!activeAuditItem?.item_id) {
+      setAuditModalAlert("Unable to determine the clause or control. Please close and reopen the dialog.");
+      return;
+    }
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setAuditModalAlert("Authentication error. Please log in again.");
+      return;
+    }
+
+    setRemovingEvidenceId(evidenceId);
+    setAuditModalAlert("");
+
+    try {
+      const response = await fetch(`http://localhost:8000/audit/items/${activeAuditItem.item_id}/evidence/${evidenceId}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data?.data) {
+        const updatedItem = data.data as AuditNextItem;
+        setActiveAuditItem(updatedItem);
+        setAuditAnswerText(updatedItem.answer ?? "");
+        setUploadedAuditEvidence(updatedItem.evidences ?? []);
+        setValidatingEvidenceId((current) => (current === evidenceId ? null : current));
+        setAuditModalAlert(data?.message || "Evidence removed.");
+      } else {
+        const message = data?.detail || data?.message || "Failed to remove evidence. Please try again.";
+        setAuditModalAlert(message);
+      }
+    } catch (error) {
+      setAuditModalAlert("Failed to remove evidence. Please try again.");
+    } finally {
+      setRemovingEvidenceId(null);
+    }
+  };
+
 
   const sendAuditConfirmationMessage = async (messageText: string): Promise<boolean> => {
     const userMessage: Message = {
@@ -911,8 +1082,16 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
         body: JSON.stringify({ answer: auditAnswerText.trim() }),
       });
 
+      const data = await response.json().catch(() => ({}));
       if (response.ok) {
-        const clauseLabel = activeAuditItem.iso_reference || activeAuditItem.title || "the clause";
+        const updatedItem = data?.data as AuditNextItem | undefined;
+        if (updatedItem) {
+          setActiveAuditItem(updatedItem);
+          setAuditAnswerText(updatedItem.answer ?? "");
+          setUploadedAuditEvidence(updatedItem.evidences ?? []);
+        }
+
+        const clauseLabel = (updatedItem?.iso_reference || activeAuditItem.iso_reference || activeAuditItem.title) || "the clause";
         const delivered = await sendAuditConfirmationMessage(`Answer recorded for ${clauseLabel}.`);
         if (delivered) {
           closeAuditAnswerModal();
@@ -920,8 +1099,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
           setAuditModalAlert("Answer saved, but I couldn't notify Nexi. Please try again to continue the conversation.");
         }
       } else {
-        const errorData = await response.json().catch(() => ({}));
-        const message = errorData?.detail || errorData?.message || "Failed to submit the answer. Please try again.";
+        const message = data?.detail || data?.message || "Failed to submit the answer. Please try again.";
         setAuditModalAlert(message);
       }
     } catch (error) {
@@ -1328,6 +1506,9 @@ Please try again or contact support if the issue persists.`,
               <button className="audit-modal-close" onClick={closeAuditAnswerModal} disabled={isSubmittingAuditAnswer || isUploadingAuditEvidence}>X</button>
             </div>
             <div className="audit-modal-body">
+              {isRefreshingAuditItem && (
+                <div className="audit-modal-refresh">Fetching the latest clause details...</div>
+              )}
               <p className="audit-modal-clause">
                 {activeAuditItem.iso_reference && (
                   <span className="audit-modal-clause-ref">{activeAuditItem.iso_reference}</span>
@@ -1377,9 +1558,67 @@ Please try again or contact support if the issue persists.`,
                 <div className="audit-uploaded-list">
                   <span>Uploaded evidence:</span>
                   <ul>
-                    {uploadedAuditEvidence.map((fileName) => (
-                      <li key={fileName}>{fileName}</li>
-                    ))}
+                    {uploadedAuditEvidence.map((evidence) => {
+                      const statusLabel = formatEvidenceStatus(evidence.validation_status);
+                      const confidenceLabel = formatValidationConfidence(evidence.validation_confidence);
+                      const validatedAt = formatValidationTimestamp(evidence.last_validated_at);
+                      const recommendations = Array.isArray(evidence.validation_recommendations)
+                        ? evidence.validation_recommendations
+                        : [];
+
+                      return (
+                        <li key={evidence.id}>
+                          <div className="audit-evidence-row">
+                            <div className="audit-evidence-header">
+                              <div className="audit-evidence-meta">
+                                <span className="audit-evidence-name">{evidence.file_name}</span>
+                                {statusLabel && (
+                                  <span
+                                    className={`audit-evidence-status audit-evidence-status-${evidence.validation_status}`}
+                                  >
+                                    {statusLabel}
+                                  </span>
+                                )}
+                                {confidenceLabel && <span className="audit-evidence-confidence">{confidenceLabel}</span>}
+                                {validatedAt && (
+                                  <span className="audit-evidence-timestamp">Last checked {validatedAt}</span>
+                                )}
+                              </div>
+                              <div className="audit-evidence-actions">
+                                <button
+                                  className="audit-evidence-remove-btn"
+                                  onClick={() => handleRemoveEvidence(evidence.id)}
+                                  disabled={isRefreshingAuditItem || isUploadingAuditEvidence || isSubmittingAuditAnswer || removingEvidenceId === evidence.id || validatingEvidenceId === evidence.id}
+                                  aria-label={`Remove ${evidence.file_name}`}
+                                >
+                                  &times;
+                                </button>
+                                <button
+                                  className="audit-evidence-validate-btn"
+                                  onClick={() => handleValidateEvidence(evidence.id)}
+                                  disabled={isRefreshingAuditItem || isUploadingAuditEvidence || isSubmittingAuditAnswer || validatingEvidenceId === evidence.id || removingEvidenceId === evidence.id}
+                                >
+                                  {validatingEvidenceId === evidence.id ? "Validating..." : "Validate evidence"}
+                                </button>
+                              </div>
+                            </div>
+                            {evidence.validation_summary && (
+                              <p className="audit-evidence-summary">{evidence.validation_summary}</p>
+                            )}
+                            {!evidence.validation_summary && evidence.validation_error && (
+                              <p className="audit-evidence-error">{evidence.validation_error}</p>
+                            )}
+                            {recommendations.length > 0 && (
+                              <ul className="audit-evidence-recommendations">
+                                {recommendations.map((rec, index) => (
+                                  <li key={index}>{rec}</li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
               )}
@@ -1466,7 +1705,7 @@ Please try again or contact support if the issue persists.`,
                   {message.action?.type === "request_audit_answer" && (
                     <button
                       className="audit-answer-button"
-                      onClick={() => openAuditAnswerModal(message.action?.item)}
+                      onClick={() => void openAuditAnswerModal(message.action?.item)}
                       disabled={isLoading}
                     >
                       Submit clause answer

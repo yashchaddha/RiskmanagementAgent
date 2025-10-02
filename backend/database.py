@@ -159,6 +159,47 @@ class S3EvidenceStorage:
         except ClientError as exc:
             raise RuntimeError(f"Failed to delete evidence from S3: {exc}") from exc
 
+    @classmethod
+    def download_object(
+        cls,
+        object_key: str,
+        *,
+        bucket: Optional[str] = None,
+        max_bytes: int = 2 * 1024 * 1024,
+    ) -> Tuple[bytes, bool, Optional[str]]:
+        if not object_key:
+            raise RuntimeError("Object key is required to download evidence")
+        client = cls._get_client()
+        actual_bucket = bucket or AUDIT_EVIDENCE_BUCKET
+        if not actual_bucket:
+            raise RuntimeError("AUDIT_EVIDENCE_BUCKET is not configured")
+
+        get_kwargs: Dict[str, Any] = {"Bucket": actual_bucket, "Key": object_key}
+        if max_bytes and max_bytes > 0:
+            get_kwargs["Range"] = f"bytes=0-{max_bytes - 1}"
+
+        try:
+            response = client.get_object(**get_kwargs)
+        except ClientError as exc:
+            raise RuntimeError(f"Failed to download evidence from S3: {exc}") from exc
+
+        body = response.get("Body")
+        if body is None:
+            return b"", False, response.get("ContentType")
+
+        content: bytes = body.read()
+        truncated = False
+        if max_bytes and max_bytes > 0:
+            content_range = response.get("ContentRange")
+            if content_range and "/" in content_range:
+                try:
+                    total_size = int(content_range.split("/")[-1])
+                    truncated = total_size > len(content)
+                except ValueError:
+                    truncated = False
+
+        return content, truncated, response.get("ContentType")
+
 
 class AuditTemplateService:
     """Provides ISO 27001 clause and annex templates for new users."""
@@ -697,6 +738,73 @@ class AuditDatabaseService:
         return DatabaseResult(True, "Audit item removed successfully")
 
     @staticmethod
+    async def get_item(user_id: str, item_id: str) -> DatabaseResult:
+        if not user_id or not item_id:
+            return DatabaseResult(False, "user_id and item_id are required to fetch audit item")
+
+        document = audit_items_collection.find_one({"user_id": user_id, "item_id": item_id})
+        if not document:
+            return DatabaseResult(False, f"Audit item {item_id} not found for user {user_id}")
+
+        item = AuditDatabaseService._document_to_model(document)
+        if not item:
+            return DatabaseResult(False, "Failed to hydrate audit item")
+
+        return DatabaseResult(True, "Audit item retrieved", item)
+
+
+    @staticmethod
+    async def get_audit_evidence(user_id: str, item_id: str, evidence_id: str) -> DatabaseResult:
+        document = audit_items_collection.find_one({"user_id": user_id, "item_id": item_id})
+        if not document:
+            return DatabaseResult(False, f"Audit item {item_id} not found for user {user_id}")
+
+        evidences = document.get("evidences", []) or []
+        evidence_doc = next((ev for ev in evidences if ev.get("id") == evidence_id), None)
+        if not evidence_doc:
+            return DatabaseResult(False, f"Evidence {evidence_id} not found on audit item {item_id}")
+
+        item = AuditDatabaseService._document_to_model(document)
+        if not item:
+            return DatabaseResult(False, "Failed to hydrate audit item")
+
+        evidence = next((ev for ev in item.evidences if ev.id == evidence_id), None)
+        if not evidence:
+            return DatabaseResult(False, f"Evidence {evidence_id} not found on audit item {item_id}")
+
+        return DatabaseResult(True, "Audit evidence retrieved", {"item": item, "evidence": evidence})
+
+    @staticmethod
+    async def record_evidence_validation(
+        user_id: str,
+        item_id: str,
+        evidence_id: str,
+        validation_fields: Dict[str, Any],
+    ) -> DatabaseResult:
+        fields = validation_fields or {}
+        set_fields = {f"evidences.$.{key}": value for key, value in fields.items()}
+        set_fields["updated_at"] = datetime.utcnow()
+
+        updated = audit_items_collection.find_one_and_update(
+            {"user_id": user_id, "item_id": item_id, "evidences.id": evidence_id},
+            {"$set": set_fields},
+            return_document=ReturnDocument.AFTER,
+        )
+
+        if not updated:
+            return DatabaseResult(False, f"Evidence {evidence_id} not found on audit item {item_id}")
+
+        item = AuditDatabaseService._document_to_model(updated)
+        if not item:
+            return DatabaseResult(False, "Failed to hydrate audit item after validation update")
+
+        evidence = next((ev for ev in item.evidences if ev.id == evidence_id), None)
+        if not evidence:
+            return DatabaseResult(False, f"Evidence {evidence_id} not found on audit item {item_id}")
+
+        return DatabaseResult(True, "Evidence validation updated", {"item": item, "evidence": evidence})
+
+    @staticmethod
     async def append_evidence(
         user_id: str,
         item_id: str,
@@ -725,8 +833,15 @@ class AuditDatabaseService:
             "uploaded_at": datetime.utcnow(),
             "checksum": checksum,
             "version_id": version_id,
+            "validation_status": None,
+            "validation_summary": None,
+            "validation_confidence": None,
+            "validation_recommendations": [],
+            "last_validated_at": None,
+            "validation_model": None,
+            "validation_error": None,
+            "validation_truncated": None,
         }
-
         updated = audit_items_collection.find_one_and_update(
             {"user_id": user_id, "item_id": item_id},
             {
@@ -2698,4 +2813,3 @@ class ControlDatabaseService:
                 message=f"Error updating control status: {str(e)}",
                 data=None
             )
-        
