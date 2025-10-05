@@ -127,6 +127,10 @@ class AnswerRequest(BaseModel):
     answer: str
 
 
+class AttachControlsRequest(BaseModel):
+    control_ids: List[str]
+
+
 class SimpleResponse(BaseModel):
     success: bool
     message: str
@@ -222,6 +226,24 @@ async def submit_audit_answer(
 ):
     user_id = _ensure_user_id(current_user)
     result = await AuditDatabaseService.submit_answer(user_id, item_id, request.answer)
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    item = result.data
+    if item and not isinstance(item, AuditItem):
+        item = AuditItem(**item)
+
+    return AuditItemResponse(success=True, message=result.message, data=item)
+
+
+@router.post("/items/{item_id}/controls", response_model=AuditItemResponse)
+async def set_audit_item_controls(
+    item_id: str,
+    request: AttachControlsRequest,
+    current_user=Depends(get_current_user),
+):
+    user_id = _ensure_user_id(current_user)
+    result = await AuditDatabaseService.set_annex_controls(user_id, item_id, request.control_ids)
     if not result.success:
         raise HTTPException(status_code=400, detail=result.message)
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+﻿import React, { useState, useEffect, useRef } from "react";
 import "./Chatbot.css";
 import logo from "../assets/logo.svg";
 import { RiskTable } from "./RiskTable";
@@ -82,6 +82,7 @@ interface AuditNextItem {
   description?: string;
   answer?: string;
   type?: string;
+  attached_control_ids?: string[];
   evidences?: AuditEvidenceRecord[];
 }
 
@@ -137,6 +138,7 @@ interface ControlItem {
   evidence_samples: string[];
   metrics: string[];
   frequency: string;
+  attached_annex_item_ids?: string[];
   policy_ref: string;
   status: string;
   rationale: string;
@@ -283,6 +285,13 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   const [validatingEvidenceId, setValidatingEvidenceId] = useState<string | null>(null);
   const [removingEvidenceId, setRemovingEvidenceId] = useState<string | null>(null);
   const [isRefreshingAuditItem, setIsRefreshingAuditItem] = useState(false);
+  const [isAttachControlsModalOpen, setIsAttachControlsModalOpen] = useState(false);
+  const [attachControlsList, setAttachControlsList] = useState<ControlItem[]>([]);
+  const [selectedControlIds, setSelectedControlIds] = useState<string[]>([]);
+  const [isLoadingAttachControls, setIsLoadingAttachControls] = useState(false);
+  const [isSavingAttachControls, setIsSavingAttachControls] = useState(false);
+  const [attachControlsAlert, setAttachControlsAlert] = useState<string>("");
+
   const fileUploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const auditProgress = riskContext?.audit;
@@ -330,10 +339,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       text: formattedResponse,
       sender: "bot",
       timestamp: new Date(),
-      action:
-        requestAction && requestAction.item
-          ? { type: requestAction.type, item: requestAction.item }
-          : undefined,
+      action: requestAction && requestAction.item ? { type: requestAction.type, item: requestAction.item } : undefined,
     };
 
     setMessages((prev) => [...prev, botMessage]);
@@ -351,6 +357,16 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  useEffect(() => {
+    if (!isAttachControlsModalOpen) {
+      if (activeAuditItem?.attached_control_ids) {
+        setSelectedControlIds(activeAuditItem.attached_control_ids);
+      } else {
+        setSelectedControlIds([]);
+      }
+    }
+  }, [activeAuditItem?.item_id, isAttachControlsModalOpen]);
 
   useEffect(() => {
     // Get greeting when component mounts
@@ -832,10 +848,12 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
   };
 
   const closeAuditAnswerModal = () => {
+    closeAttachControlsModal();
     setIsAuditAnswerModalOpen(false);
     setActiveAuditItem(null);
     setAuditAnswerText("");
     setUploadedAuditEvidence([]);
+    setSelectedControlIds([]);
     setValidatingEvidenceId(null);
     setRemovingEvidenceId(null);
     setIsRefreshingAuditItem(false);
@@ -979,6 +997,124 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
     }
   };
 
+  const loadControlsForAttachment = async () => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setAttachControlsAlert("Authentication error. Please log in again.");
+      setAttachControlsList([]);
+      return;
+    }
+
+    setIsLoadingAttachControls(true);
+    setAttachControlsAlert("");
+
+    try {
+      const response = await fetch("http://localhost:8000/controls", {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && Array.isArray(data?.data)) {
+        setAttachControlsList(data.data as ControlItem[]);
+      } else {
+        const message = data?.detail || data?.message || "Failed to load controls. Please try again.";
+        setAttachControlsAlert(message);
+        setAttachControlsList([]);
+      }
+    } catch (error) {
+      setAttachControlsAlert("Failed to load controls. Please try again.");
+      setAttachControlsList([]);
+    } finally {
+      setIsLoadingAttachControls(false);
+    }
+  };
+
+  const openAttachControlsModal = async (item?: AuditNextItem | null) => {
+    const targetItem = item ?? activeAuditItem;
+    if (!targetItem?.item_id) {
+      return;
+    }
+
+    setSelectedControlIds(targetItem.attached_control_ids ?? []);
+    setAttachControlsAlert("");
+    setAttachControlsList([]);
+    setIsAttachControlsModalOpen(true);
+    await loadControlsForAttachment();
+  };
+
+  const closeAttachControlsModal = () => {
+    setIsAttachControlsModalOpen(false);
+    setAttachControlsList([]);
+    setAttachControlsAlert("");
+    setIsLoadingAttachControls(false);
+    setIsSavingAttachControls(false);
+  };
+
+  const toggleControlSelection = (controlId: string) => {
+    setSelectedControlIds((prev) => {
+      if (prev.includes(controlId)) {
+        return prev.filter((id) => id !== controlId);
+      }
+      return [...prev, controlId];
+    });
+  };
+
+  const handleAttachControlsSubmit = async () => {
+    if (!activeAuditItem?.item_id) {
+      setAttachControlsAlert("Unable to determine the annex control. Please close and reopen the dialog.");
+      return;
+    }
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setAttachControlsAlert("Authentication error. Please log in again.");
+      return;
+    }
+
+    setIsSavingAttachControls(true);
+    setAttachControlsAlert("");
+
+    try {
+      const response = await fetch(`http://localhost:8000/audit/items/${activeAuditItem.item_id}/controls`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ control_ids: selectedControlIds }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data?.data) {
+        const updatedItem = data.data as AuditNextItem;
+        setActiveAuditItem(updatedItem);
+        setSelectedControlIds(updatedItem.attached_control_ids ?? []);
+        setUploadedAuditEvidence(updatedItem.evidences ?? []);
+
+        setRiskContext((prev) => {
+          if (!prev) return prev;
+          const next = { ...prev };
+          if (next.audit_next_item?.item_id === updatedItem.item_id) {
+            next.audit_next_item = { ...next.audit_next_item, attached_control_ids: updatedItem.attached_control_ids };
+          }
+          return next;
+        });
+
+        setAuditModalAlert("Controls attached to this annex have been updated.");
+        closeAttachControlsModal();
+      } else {
+        const message = data?.detail || data?.message || "Failed to update controls. Please try again.";
+        setAttachControlsAlert(message);
+      }
+    } catch (error) {
+      setAttachControlsAlert("Failed to update controls. Please try again.");
+    } finally {
+      setIsSavingAttachControls(false);
+    }
+  };
 
   const sendAuditConfirmationMessage = async (messageText: string): Promise<boolean> => {
     const userMessage: Message = {
@@ -1051,7 +1187,6 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
     return wasSuccessful;
   };
 
-
   const handleAuditAnswerSubmit = async () => {
     if (!activeAuditItem?.item_id) {
       setAuditModalAlert("Unable to determine the clause. Please close the dialog and try again.");
@@ -1091,7 +1226,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
           setUploadedAuditEvidence(updatedItem.evidences ?? []);
         }
 
-        const clauseLabel = (updatedItem?.iso_reference || activeAuditItem.iso_reference || activeAuditItem.title) || "the clause";
+        const clauseLabel = updatedItem?.iso_reference || activeAuditItem.iso_reference || activeAuditItem.title || "the clause";
         const delivered = await sendAuditConfirmationMessage(`Answer recorded for ${clauseLabel}.`);
         if (delivered) {
           closeAuditAnswerModal();
@@ -1503,54 +1638,35 @@ Please try again or contact support if the issue persists.`,
           <div className="audit-modal">
             <div className="audit-modal-header">
               <h3>Submit Clause Response</h3>
-              <button className="audit-modal-close" onClick={closeAuditAnswerModal} disabled={isSubmittingAuditAnswer || isUploadingAuditEvidence}>X</button>
+              <button className="audit-modal-close" onClick={closeAuditAnswerModal} disabled={isSubmittingAuditAnswer || isUploadingAuditEvidence}>
+                X
+              </button>
             </div>
             <div className="audit-modal-body">
-              {isRefreshingAuditItem && (
-                <div className="audit-modal-refresh">Fetching the latest clause details...</div>
-              )}
+              {isRefreshingAuditItem && <div className="audit-modal-refresh">Fetching the latest clause details...</div>}
               <p className="audit-modal-clause">
-                {activeAuditItem.iso_reference && (
-                  <span className="audit-modal-clause-ref">{activeAuditItem.iso_reference}</span>
-                )}
+                {activeAuditItem.iso_reference && <span className="audit-modal-clause-ref">{activeAuditItem.iso_reference}</span>}
                 {activeAuditItem.title && <span className="audit-modal-clause-title">{activeAuditItem.title}</span>}
               </p>
-              {activeAuditItem.description && (
-                <p className="audit-modal-description">{activeAuditItem.description}</p>
-              )}
-              <label className="audit-modal-label" htmlFor="audit-answer-input">Your response</label>
-              <textarea
-                id="audit-answer-input"
-                value={auditAnswerText}
-                onChange={(event) => setAuditAnswerText(event.target.value)}
-                placeholder="Capture your clause response..."
-                rows={6}
-                disabled={isSubmittingAuditAnswer}
-              />
+              {activeAuditItem.description && <p className="audit-modal-description">{activeAuditItem.description}</p>}
+              <label className="audit-modal-label" htmlFor="audit-answer-input">
+                Your response
+              </label>
+              <textarea id="audit-answer-input" value={auditAnswerText} onChange={(event) => setAuditAnswerText(event.target.value)} placeholder="Capture your clause response..." rows={6} disabled={isSubmittingAuditAnswer} />
               <div className="audit-modal-buttons">
-                <button
-                  className="audit-submit-btn"
-                  onClick={handleAuditAnswerSubmit}
-                  disabled={isSubmittingAuditAnswer || isUploadingAuditEvidence}
-                >
+                <button className="audit-submit-btn" onClick={handleAuditAnswerSubmit} disabled={isSubmittingAuditAnswer || isUploadingAuditEvidence}>
                   {isSubmittingAuditAnswer ? "Saving..." : "Submit answer"}
                 </button>
                 <label className={`audit-upload-btn${isUploadingAuditEvidence || isSubmittingAuditAnswer ? " disabled" : ""}`}>
-                  <input
-                    type="file"
-                    ref={fileUploadInputRef}
-                    onChange={handleAuditEvidenceUpload}
-                    disabled={isUploadingAuditEvidence || isSubmittingAuditAnswer}
-                    accept="*/*"
-                    hidden
-                  />
+                  <input type="file" ref={fileUploadInputRef} onChange={handleAuditEvidenceUpload} disabled={isUploadingAuditEvidence || isSubmittingAuditAnswer} accept="*/*" hidden />
                   {isUploadingAuditEvidence ? "Uploading..." : "Upload evidence"}
                 </label>
-                <button
-                  className="audit-cancel-btn"
-                  onClick={closeAuditAnswerModal}
-                  disabled={isSubmittingAuditAnswer || isUploadingAuditEvidence}
-                >
+                {activeAuditItem?.type === "annex" && (
+                  <button className="audit-attach-btn" onClick={() => void openAttachControlsModal(activeAuditItem)} disabled={isSubmittingAuditAnswer || isUploadingAuditEvidence || isRefreshingAuditItem}>
+                    Attach controls
+                  </button>
+                )}
+                <button className="audit-cancel-btn" onClick={closeAuditAnswerModal} disabled={isSubmittingAuditAnswer || isUploadingAuditEvidence}>
                   Cancel
                 </button>
               </div>
@@ -1562,9 +1678,7 @@ Please try again or contact support if the issue persists.`,
                       const statusLabel = formatEvidenceStatus(evidence.validation_status);
                       const confidenceLabel = formatValidationConfidence(evidence.validation_confidence);
                       const validatedAt = formatValidationTimestamp(evidence.last_validated_at);
-                      const recommendations = Array.isArray(evidence.validation_recommendations)
-                        ? evidence.validation_recommendations
-                        : [];
+                      const recommendations = Array.isArray(evidence.validation_recommendations) ? evidence.validation_recommendations : [];
 
                       return (
                         <li key={evidence.id}>
@@ -1572,42 +1686,21 @@ Please try again or contact support if the issue persists.`,
                             <div className="audit-evidence-header">
                               <div className="audit-evidence-meta">
                                 <span className="audit-evidence-name">{evidence.file_name}</span>
-                                {statusLabel && (
-                                  <span
-                                    className={`audit-evidence-status audit-evidence-status-${evidence.validation_status}`}
-                                  >
-                                    {statusLabel}
-                                  </span>
-                                )}
+                                {statusLabel && <span className={`audit-evidence-status audit-evidence-status-${evidence.validation_status}`}>{statusLabel}</span>}
                                 {confidenceLabel && <span className="audit-evidence-confidence">{confidenceLabel}</span>}
-                                {validatedAt && (
-                                  <span className="audit-evidence-timestamp">Last checked {validatedAt}</span>
-                                )}
+                                {validatedAt && <span className="audit-evidence-timestamp">Last checked {validatedAt}</span>}
                               </div>
                               <div className="audit-evidence-actions">
-                                <button
-                                  className="audit-evidence-remove-btn"
-                                  onClick={() => handleRemoveEvidence(evidence.id)}
-                                  disabled={isRefreshingAuditItem || isUploadingAuditEvidence || isSubmittingAuditAnswer || removingEvidenceId === evidence.id || validatingEvidenceId === evidence.id}
-                                  aria-label={`Remove ${evidence.file_name}`}
-                                >
+                                <button className="audit-evidence-remove-btn" onClick={() => handleRemoveEvidence(evidence.id)} disabled={isRefreshingAuditItem || isUploadingAuditEvidence || isSubmittingAuditAnswer || removingEvidenceId === evidence.id || validatingEvidenceId === evidence.id} aria-label={`Remove ${evidence.file_name}`}>
                                   &times;
                                 </button>
-                                <button
-                                  className="audit-evidence-validate-btn"
-                                  onClick={() => handleValidateEvidence(evidence.id)}
-                                  disabled={isRefreshingAuditItem || isUploadingAuditEvidence || isSubmittingAuditAnswer || validatingEvidenceId === evidence.id || removingEvidenceId === evidence.id}
-                                >
+                                <button className="audit-evidence-validate-btn" onClick={() => handleValidateEvidence(evidence.id)} disabled={isRefreshingAuditItem || isUploadingAuditEvidence || isSubmittingAuditAnswer || validatingEvidenceId === evidence.id || removingEvidenceId === evidence.id}>
                                   {validatingEvidenceId === evidence.id ? "Validating..." : "Validate evidence"}
                                 </button>
                               </div>
                             </div>
-                            {evidence.validation_summary && (
-                              <p className="audit-evidence-summary">{evidence.validation_summary}</p>
-                            )}
-                            {!evidence.validation_summary && evidence.validation_error && (
-                              <p className="audit-evidence-error">{evidence.validation_error}</p>
-                            )}
+                            {evidence.validation_summary && <p className="audit-evidence-summary">{evidence.validation_summary}</p>}
+                            {!evidence.validation_summary && evidence.validation_error && <p className="audit-evidence-error">{evidence.validation_error}</p>}
                             {recommendations.length > 0 && (
                               <ul className="audit-evidence-recommendations">
                                 {recommendations.map((rec, index) => (
@@ -1628,13 +1721,87 @@ Please try again or contact support if the issue persists.`,
         </div>
       )}
 
+      {isAttachControlsModalOpen && activeAuditItem && (
+        <div className="audit-modal-backdrop">
+          <div className="attach-controls-modal">
+            <div className="attach-controls-header">
+              <h3>Attach Controls</h3>
+              <button className="attach-controls-close" onClick={closeAttachControlsModal} disabled={isSavingAttachControls} aria-label="Close attach controls modal">
+                &times;
+              </button>
+            </div>
+            <div className="attach-controls-body">
+              <p className="attach-controls-context">
+                Annex {activeAuditItem.iso_reference || ""}
+                {activeAuditItem.title ? ` - ${activeAuditItem.title}` : ""}
+              </p>
+              {attachControlsAlert && <p className="attach-controls-alert">{attachControlsAlert}</p>}
+              {isLoadingAttachControls ? (
+                <p className="attach-controls-loading">Loading controls...</p>
+              ) : attachControlsList.length === 0 ? (
+                <p className="attach-controls-empty">No controls available.</p>
+              ) : (
+                <div className="attach-controls-sections">
+                  <div className="attach-controls-section">
+                    <h4>Currently attached</h4>
+                    {attachControlsList.filter((control) => (control.attached_annex_item_ids || []).includes(activeAuditItem.item_id ?? "")).length === 0 ? (
+                      <p className="attach-controls-empty">No controls attached yet.</p>
+                    ) : (
+                      <div className="attach-controls-list">
+                        {attachControlsList
+                          .filter((control) => (control.attached_annex_item_ids || []).includes(activeAuditItem.item_id ?? ""))
+                          .map((control) => (
+                            <label key={control.control_id} className="attach-control-item">
+                              <input type="checkbox" checked={selectedControlIds.includes(control.control_id)} onChange={() => toggleControlSelection(control.control_id)} disabled={isSavingAttachControls} />
+                              <span>
+                                <span className="attach-control-title">{control.control_title}</span>
+                                {control.control_id ? <span className="attach-control-id">{control.control_id}</span> : null}
+                              </span>
+                            </label>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="attach-controls-section">
+                    <h4>Available controls</h4>
+                    {attachControlsList.filter((control) => !(control.attached_annex_item_ids || []).includes(activeAuditItem.item_id ?? "")).length === 0 ? (
+                      <p className="attach-controls-empty">All controls are already attached.</p>
+                    ) : (
+                      <div className="attach-controls-list">
+                        {attachControlsList
+                          .filter((control) => !(control.attached_annex_item_ids || []).includes(activeAuditItem.item_id ?? ""))
+                          .map((control) => (
+                            <label key={control.control_id} className="attach-control-item">
+                              <input type="checkbox" checked={selectedControlIds.includes(control.control_id)} onChange={() => toggleControlSelection(control.control_id)} disabled={isSavingAttachControls} />
+                              <span>
+                                <span className="attach-control-title">{control.control_title}</span>
+                                {control.control_id ? <span className="attach-control-id">{control.control_id}</span> : null}
+                              </span>
+                            </label>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="attach-controls-footer">
+              <button className="attach-controls-save" onClick={handleAttachControlsSubmit} disabled={isSavingAttachControls}>
+                {isSavingAttachControls ? "Saving..." : "Save attachments"}
+              </button>
+              <button className="attach-controls-cancel" onClick={closeAttachControlsModal} disabled={isSavingAttachControls}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {auditProgress && (
         <div className="audit-status-card">
           <div className="audit-status-top">
             <span className="audit-status-title">Audit Facilitator</span>
-            <span className={`audit-status-badge ${auditComplete ? "complete" : "in-progress"}`}>
-              {auditComplete ? "Complete" : "In Progress"}
-            </span>
+            <span className={`audit-status-badge ${auditComplete ? "complete" : "in-progress"}`}>{auditComplete ? "Complete" : "In Progress"}</span>
           </div>
           <div className="audit-status-metrics">
             <span>
@@ -1659,17 +1826,8 @@ Please try again or contact support if the issue persists.`,
               </span>
             </div>
           )}
-          {!auditComplete && skippedCount > 0 && (
-            <p className="audit-skip-note">
-              {skippedCount === 1 ? "1 clause is skipped" : `${skippedCount} clauses are skipped`}
-              {" "}— complete them before finishing the assessment.
-            </p>
-          )}
-          {auditComplete && (
-            <p className="audit-complete-note">
-              Great work—the audit checklist is complete. Ask Nexi to generate risks whenever you're ready.
-            </p>
-          )}
+          {!auditComplete && skippedCount > 0 && <p className="audit-skip-note">{skippedCount === 1 ? "1 clause is skipped" : `${skippedCount} clauses are skipped`} — complete them before finishing the assessment.</p>}
+          {auditComplete && <p className="audit-complete-note">Great work—the audit checklist is complete. Ask Nexi to generate risks whenever you're ready.</p>}
         </div>
       )}
 
@@ -1703,12 +1861,8 @@ Please try again or contact support if the issue persists.`,
                     messageId={message.id}
                   />
                   {message.action?.type === "request_audit_answer" && (
-                    <button
-                      className="audit-answer-button"
-                      onClick={() => void openAuditAnswerModal(message.action?.item)}
-                      disabled={isLoading}
-                    >
-                      Submit clause answer
+                    <button className="audit-answer-button" onClick={() => void openAuditAnswerModal(message.action?.item)} disabled={isLoading}>
+                      Submit answer
                     </button>
                   )}
                 </>

@@ -149,6 +149,7 @@ class AuditItem(BaseModel):
     answer_updated_at: Optional[datetime] = None
     skipped_at: Optional[datetime] = None
     evidences: List[AuditEvidence] = Field(default_factory=list)
+    attached_control_ids: List[str] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -205,6 +206,7 @@ class Control(BaseModel):
     evidence_samples: List[str]
     metrics: List[str]
     frequency: str
+    attached_annex_item_ids: List[str] = Field(default_factory=list)
     policy_ref: str
     status: str
     rationale: str

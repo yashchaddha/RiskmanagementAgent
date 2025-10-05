@@ -436,9 +436,9 @@ def audit_facilitator_node(state: LLMState) -> LLMState:
         if requested_answer and "submit clause answer" not in final_text.lower():
             final_text = final_text.rstrip()
             if final_text:
-                final_text += "\n\nPlease use the \"Submit clause answer\" button below to record your response when you're ready."
+                final_text += "\n\nPlease use the \"Submit answer\" button below to record your response when you're ready."
             else:
-                final_text = "Please use the \"Submit clause answer\" button below to record your response when you're ready."
+                final_text = "Please use the \"Submit answer\" button below to record your response when you're ready."
 
         if phase_transition_note:
             note_lower = phase_transition_note.lower()
