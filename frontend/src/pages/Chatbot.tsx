@@ -324,14 +324,36 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
 
   // const currentAnnexReference = activeAuditItem?.iso_reference || "";
 
+  const currentAnnexReference = (activeAuditItem?.iso_reference || "").trim();
+  const normalizedAnnexReference = currentAnnexReference.replace(/[^a-z0-9]/gi, "").toLowerCase();
+
+  const isControlRecommended = (control?: ControlItem | null) => {
+    if (!normalizedAnnexReference) {
+      return false;
+    }
+    const mappings = control?.annexA_map || [];
+    return mappings.some((mapping) => {
+      const mappingId = (mapping?.id || "").trim();
+      if (!mappingId) return false;
+      const normalizedMapping = mappingId.replace(/[^a-z0-9]/gi, "").toLowerCase();
+      return normalizedMapping === normalizedAnnexReference;
+    });
+  };
+
   const attachedControlOptions = selectedControlIds.map((controlId) => {
     const detail = attachControlsList.find((control) => control.control_id === controlId);
     return { controlId, detail };
   });
 
+  const recommendedAttachedOptions = attachedControlOptions.filter(({ detail }) => detail && isControlRecommended(detail));
+  const otherAttachedOptions = attachedControlOptions.filter(({ detail }) => !(detail && isControlRecommended(detail)));
+
   const availableControls = attachControlsList.filter((control) => !selectedControlIds.includes(control.control_id));
 
-  const hasAnyAttachableControls = availableControls.length > 0 || attachedControlOptions.length > 0;
+  const recommendedAvailableControls = availableControls.filter((control) => isControlRecommended(control));
+  const otherAvailableControls = availableControls.filter((control) => !isControlRecommended(control));
+
+  const hasAnyAttachableControls = attachControlsList.length > 0;
 
   // Note: latestBotMessageId no longer used; animation is controlled by animateMessageId
 
@@ -1029,21 +1051,9 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
       const data = await response.json().catch(() => ({}));
       if (response.ok && Array.isArray(data?.data)) {
         const controls = data.data as ControlItem[];
-        const isoReference = (activeAuditItem?.iso_reference || "").trim();
-        const normalizedIso = isoReference.replace(/[^a-z0-9]/gi, "").toLowerCase();
-        const filteredControls = controls.filter((control) => {
-          if (!isoReference) return true;
-          return (control.annexA_map || []).some((mapping) => {
-            const mappingId = (mapping?.id || "").trim();
-            if (!mappingId) return false;
-            const normalizedMapping = mappingId.replace(/[^a-z0-9]/gi, "").toLowerCase();
-            return normalizedMapping === normalizedIso;
-          });
-        });
-
-        setAttachControlsList(filteredControls);
-        if (filteredControls.length === 0) {
-          setAttachControlsAlert("No controls found that are mapped to this annex.");
+        setAttachControlsList(controls);
+        if (controls.length === 0) {
+          setAttachControlsAlert("No controls available for your organization yet.");
         }
       } else {
         const message = data?.detail || data?.message || "Failed to load controls. Please try again.";
@@ -1774,7 +1784,7 @@ Please try again or contact support if the issue persists.`,
                       <p className="attach-controls-empty">No controls attached yet.</p>
                     ) : (
                       <div className="attach-controls-list">
-                        {attachedControlOptions.map(({ controlId, detail }) => (
+                        {[...recommendedAttachedOptions, ...otherAttachedOptions].map(({ controlId, detail }) => (
                           <label key={controlId} className="attach-control-item">
                             <input type="checkbox" checked={selectedControlIds.includes(controlId)} onChange={() => toggleControlSelection(controlId)} disabled={isSavingAttachControls} />
                             <span>
@@ -1792,13 +1802,15 @@ Please try again or contact support if the issue persists.`,
                       <p className="attach-controls-empty">All eligible controls are already attached.</p>
                     ) : (
                       <div className="attach-controls-list">
-                        {availableControls.map((control) => (
+                        {[...recommendedAvailableControls, ...otherAvailableControls].map((control) => (
                           <label key={control.control_id} className="attach-control-item">
                             <input type="checkbox" checked={selectedControlIds.includes(control.control_id)} onChange={() => toggleControlSelection(control.control_id)} disabled={isSavingAttachControls} />
                             <span>
                               <span className="attach-control-title">
                                 {control.control_title}
-                                <span className="attach-control-label">Recommended</span>
+                                {isControlRecommended(control) && (
+                                  <span className="attach-control-label">Recommended</span>
+                                )}
                               </span>
                               {control.control_id ? <span className="attach-control-id">{control.control_id}</span> : null}
                             </span>
@@ -1923,3 +1935,5 @@ Please try again or contact support if the issue persists.`,
     </div>
   );
 };
+
+

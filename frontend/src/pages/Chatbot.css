@@ -1099,3 +1099,10 @@
   font-weight: 600;
   text-transform: uppercase;
 }
+
+.audit-modal textarea {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+}
