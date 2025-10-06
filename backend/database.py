@@ -730,20 +730,6 @@ class AuditDatabaseService:
             except Exception as exc:  # noqa: BLE001 - must continue deletions
                 errors.append(str(exc))
 
-        attached_controls = document.get("attached_control_ids", []) or []
-        if attached_controls:
-            user_doc = users_collection.find_one({"username": user_id})
-            now = datetime.utcnow()
-            for control_id in attached_controls:
-                controls_collection.update_one(
-                    {"user_ref": user_doc["_id"] if user_doc else None, "control_id": control_id},
-                    {"$pull": {"attached_annex_item_ids": item_id}, "$set": {"updated_at": now}},
-                )
-                if user_doc:
-                    refreshed = controls_collection.find_one({"user_ref": user_doc["_id"], "control_id": control_id})
-                    if refreshed:
-                        ControlDatabaseService._sync_control_vector_entry(user_doc, refreshed, user_id)
-
         audit_items_collection.delete_one({"_id": document["_id"]})
 
         if errors:
@@ -823,6 +809,7 @@ class AuditDatabaseService:
         return DatabaseResult(True, "Evidence validation updated", {"item": item, "evidence": evidence})
 
     @staticmethod
+    @staticmethod
     async def set_annex_controls(user_id: str, item_id: str, control_ids: Optional[List[str]]) -> DatabaseResult:
         if not user_id or not item_id:
             return DatabaseResult(False, "user_id and item_id are required to update annex controls")
@@ -842,26 +829,6 @@ class AuditDatabaseService:
                 seen.add(cid_str)
                 sanitized_ids.append(cid_str)
 
-        previous_ids = document.get("attached_control_ids", []) or []
-        previous_set = {str(cid).strip() for cid in previous_ids if str(cid).strip()}
-
-        user_doc = users_collection.find_one({"username": user_id})
-        if not user_doc:
-            return DatabaseResult(False, f"User {user_id} not found in database")
-
-        lookup_ids = set(previous_set).union(sanitized_ids)
-        if lookup_ids:
-            controls_cursor = controls_collection.find({"user_ref": user_doc["_id"], "control_id": {"$in": list(lookup_ids)}})
-            control_docs = {str(doc.get("control_id")): doc for doc in controls_cursor}
-        else:
-            control_docs = {}
-
-        sanitized_ids = [cid for cid in sanitized_ids if cid in control_docs]
-        new_set = set(sanitized_ids)
-
-        to_add = new_set - previous_set
-        to_remove = previous_set - new_set
-
         updated_doc = audit_items_collection.find_one_and_update(
             {"user_id": user_id, "item_id": item_id},
             {"$set": {"attached_control_ids": sanitized_ids, "updated_at": datetime.utcnow()}},
@@ -870,26 +837,6 @@ class AuditDatabaseService:
 
         if not updated_doc:
             return DatabaseResult(False, f"Audit item {item_id} not found for user {user_id}")
-
-        now = datetime.utcnow()
-
-        for control_id in to_add:
-            controls_collection.update_one(
-                {"user_ref": user_doc["_id"], "control_id": control_id},
-                {"$addToSet": {"attached_annex_item_ids": item_id}, "$set": {"updated_at": now}},
-            )
-            refreshed = controls_collection.find_one({"user_ref": user_doc["_id"], "control_id": control_id})
-            if refreshed:
-                ControlDatabaseService._sync_control_vector_entry(user_doc, refreshed, user_id)
-
-        for control_id in to_remove:
-            controls_collection.update_one(
-                {"user_ref": user_doc["_id"], "control_id": control_id},
-                {"$pull": {"attached_annex_item_ids": item_id}, "$set": {"updated_at": now}},
-            )
-            refreshed = controls_collection.find_one({"user_ref": user_doc["_id"], "control_id": control_id})
-            if refreshed:
-                ControlDatabaseService._sync_control_vector_entry(user_doc, refreshed, user_id)
 
         item = AuditDatabaseService._document_to_model(updated_doc)
         return DatabaseResult(True, "Annex control attachments updated", item)
@@ -2280,12 +2227,6 @@ class ControlDatabaseService:
         else:
             linked_value = ControlDatabaseService._format_linked_risk_ids_for_vector(linked_source)
 
-        attachments = source_data.get("attached_annex_item_ids")
-        if isinstance(attachments, (list, tuple, set)):
-            attachments_value = ", ".join(sorted({str(v).strip() for v in attachments if str(v).strip()}))
-        else:
-            attachments_value = str(attachments or "").strip()
-
         payload = {
             "control_id": str(source_data.get("control_id", "") or "").strip(),
             "control_title": str(source_data.get("control_title", "") or "").strip(),
@@ -2295,7 +2236,6 @@ class ControlDatabaseService:
             "status": str(source_data.get("status", "") or "").strip(),
             "annexa_mappings": annexa_value,
             "linked_risk_ids": linked_value,
-            "attached_annex_items": attachments_value,
         }
 
         return org, location, domain, payload
@@ -2375,7 +2315,6 @@ class ControlDatabaseService:
                 "status": status,
                 "rationale": rationale,
                 "assumptions": assumptions,
-                "attached_annex_item_ids": [],
                 "created_at": datetime.utcnow(),
                 "updated_at": datetime.utcnow()
             }
@@ -2400,7 +2339,6 @@ class ControlDatabaseService:
                 evidence_samples=inserted_doc["evidence_samples"],
                 metrics=inserted_doc["metrics"],
                 frequency=inserted_doc["frequency"],
-                attached_annex_item_ids=inserted_doc.get("attached_annex_item_ids", []),
                 policy_ref=inserted_doc["policy_ref"],
                 status=inserted_doc["status"],
                 rationale=inserted_doc["rationale"],
@@ -2458,7 +2396,6 @@ class ControlDatabaseService:
                     evidence_samples=doc.get("evidence_samples", []),
                     metrics=doc.get("metrics", []),
                     frequency=doc["frequency"],
-                    attached_annex_item_ids=doc.get("attached_annex_item_ids", []),
                     policy_ref=doc["policy_ref"],
                     status=doc["status"],
                     rationale=doc["rationale"],
@@ -2522,7 +2459,6 @@ class ControlDatabaseService:
                 evidence_samples=control_doc.get("evidence_samples", []),
                 metrics=control_doc.get("metrics", []),
                 frequency=control_doc["frequency"],
-                attached_annex_item_ids=control_doc.get("attached_annex_item_ids", []),
                 policy_ref=control_doc["policy_ref"],
                 status=control_doc["status"],
                 rationale=control_doc["rationale"],
@@ -2610,7 +2546,6 @@ class ControlDatabaseService:
                     evidence_samples=updated_doc.get("evidence_samples", []),
                     metrics=updated_doc.get("metrics", []),
                     frequency=updated_doc["frequency"],
-                    attached_annex_item_ids=updated_doc.get("attached_annex_item_ids", []),
                     policy_ref=updated_doc["policy_ref"],
                     status=updated_doc["status"],
                     rationale=updated_doc["rationale"],
@@ -2822,7 +2757,6 @@ class ControlDatabaseService:
                     evidence_samples=doc.get("evidence_samples", []),
                     metrics=doc.get("metrics", []),
                     frequency=doc["frequency"],
-                    attached_annex_item_ids=doc.get("attached_annex_item_ids", []),
                     policy_ref=doc["policy_ref"],
                     status=doc["status"],
                     rationale=doc["rationale"],

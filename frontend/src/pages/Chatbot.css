@@ -1086,3 +1086,16 @@
   color: #94a3b8;
   cursor: not-allowed;
 }
+
+
+.attach-control-label {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: #0ea5e9;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}

@@ -138,7 +138,6 @@ interface ControlItem {
   evidence_samples: string[];
   metrics: string[];
   frequency: string;
-  attached_annex_item_ids?: string[];
   policy_ref: string;
   status: string;
   rationale: string;
@@ -322,6 +321,17 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
     }
     return date.toLocaleString();
   };
+
+  // const currentAnnexReference = activeAuditItem?.iso_reference || "";
+
+  const attachedControlOptions = selectedControlIds.map((controlId) => {
+    const detail = attachControlsList.find((control) => control.control_id === controlId);
+    return { controlId, detail };
+  });
+
+  const availableControls = attachControlsList.filter((control) => !selectedControlIds.includes(control.control_id));
+
+  const hasAnyAttachableControls = availableControls.length > 0 || attachedControlOptions.length > 0;
 
   // Note: latestBotMessageId no longer used; animation is controlled by animateMessageId
 
@@ -1018,7 +1028,23 @@ export const Chatbot: React.FC<ChatbotProps> = ({ onLogout }) => {
 
       const data = await response.json().catch(() => ({}));
       if (response.ok && Array.isArray(data?.data)) {
-        setAttachControlsList(data.data as ControlItem[]);
+        const controls = data.data as ControlItem[];
+        const isoReference = (activeAuditItem?.iso_reference || "").trim();
+        const normalizedIso = isoReference.replace(/[^a-z0-9]/gi, "").toLowerCase();
+        const filteredControls = controls.filter((control) => {
+          if (!isoReference) return true;
+          return (control.annexA_map || []).some((mapping) => {
+            const mappingId = (mapping?.id || "").trim();
+            if (!mappingId) return false;
+            const normalizedMapping = mappingId.replace(/[^a-z0-9]/gi, "").toLowerCase();
+            return normalizedMapping === normalizedIso;
+          });
+        });
+
+        setAttachControlsList(filteredControls);
+        if (filteredControls.length === 0) {
+          setAttachControlsAlert("No controls found that are mapped to this annex.");
+        }
       } else {
         const message = data?.detail || data?.message || "Failed to load controls. Please try again.";
         setAttachControlsAlert(message);
@@ -1738,47 +1764,46 @@ Please try again or contact support if the issue persists.`,
               {attachControlsAlert && <p className="attach-controls-alert">{attachControlsAlert}</p>}
               {isLoadingAttachControls ? (
                 <p className="attach-controls-loading">Loading controls...</p>
-              ) : attachControlsList.length === 0 ? (
-                <p className="attach-controls-empty">No controls available.</p>
+              ) : !hasAnyAttachableControls ? (
+                <p className="attach-controls-empty">No controls mapped to this annex.</p>
               ) : (
                 <div className="attach-controls-sections">
                   <div className="attach-controls-section">
                     <h4>Currently attached</h4>
-                    {attachControlsList.filter((control) => (control.attached_annex_item_ids || []).includes(activeAuditItem.item_id ?? "")).length === 0 ? (
+                    {attachedControlOptions.length === 0 ? (
                       <p className="attach-controls-empty">No controls attached yet.</p>
                     ) : (
                       <div className="attach-controls-list">
-                        {attachControlsList
-                          .filter((control) => (control.attached_annex_item_ids || []).includes(activeAuditItem.item_id ?? ""))
-                          .map((control) => (
-                            <label key={control.control_id} className="attach-control-item">
-                              <input type="checkbox" checked={selectedControlIds.includes(control.control_id)} onChange={() => toggleControlSelection(control.control_id)} disabled={isSavingAttachControls} />
-                              <span>
-                                <span className="attach-control-title">{control.control_title}</span>
-                                {control.control_id ? <span className="attach-control-id">{control.control_id}</span> : null}
-                              </span>
-                            </label>
-                          ))}
+                        {attachedControlOptions.map(({ controlId, detail }) => (
+                          <label key={controlId} className="attach-control-item">
+                            <input type="checkbox" checked={selectedControlIds.includes(controlId)} onChange={() => toggleControlSelection(controlId)} disabled={isSavingAttachControls} />
+                            <span>
+                              <span className="attach-control-title">{detail?.control_title || controlId}</span>
+                              <span className="attach-control-id">{controlId}</span>
+                            </span>
+                          </label>
+                        ))}
                       </div>
                     )}
                   </div>
                   <div className="attach-controls-section">
                     <h4>Available controls</h4>
-                    {attachControlsList.filter((control) => !(control.attached_annex_item_ids || []).includes(activeAuditItem.item_id ?? "")).length === 0 ? (
-                      <p className="attach-controls-empty">All controls are already attached.</p>
+                    {availableControls.length === 0 ? (
+                      <p className="attach-controls-empty">All eligible controls are already attached.</p>
                     ) : (
                       <div className="attach-controls-list">
-                        {attachControlsList
-                          .filter((control) => !(control.attached_annex_item_ids || []).includes(activeAuditItem.item_id ?? ""))
-                          .map((control) => (
-                            <label key={control.control_id} className="attach-control-item">
-                              <input type="checkbox" checked={selectedControlIds.includes(control.control_id)} onChange={() => toggleControlSelection(control.control_id)} disabled={isSavingAttachControls} />
-                              <span>
-                                <span className="attach-control-title">{control.control_title}</span>
-                                {control.control_id ? <span className="attach-control-id">{control.control_id}</span> : null}
+                        {availableControls.map((control) => (
+                          <label key={control.control_id} className="attach-control-item">
+                            <input type="checkbox" checked={selectedControlIds.includes(control.control_id)} onChange={() => toggleControlSelection(control.control_id)} disabled={isSavingAttachControls} />
+                            <span>
+                              <span className="attach-control-title">
+                                {control.control_title}
+                                <span className="attach-control-label">Recommended</span>
                               </span>
-                            </label>
-                          ))}
+                              {control.control_id ? <span className="attach-control-id">{control.control_id}</span> : null}
+                            </span>
+                          </label>
+                        ))}
                       </div>
                     )}
                   </div>

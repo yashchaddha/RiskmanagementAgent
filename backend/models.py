@@ -206,7 +206,6 @@ class Control(BaseModel):
     evidence_samples: List[str]
     metrics: List[str]
     frequency: str
-    attached_annex_item_ids: List[str] = Field(default_factory=list)
     policy_ref: str
     status: str
     rationale: str
@@ -224,4 +223,5 @@ class ControlsResponse(BaseModel):
     success: bool
     message: str
     data: Optional[List[Control]] = None
+
 
